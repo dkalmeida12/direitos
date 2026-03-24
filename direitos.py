@@ -31,16 +31,22 @@ def buscar_primeiro(texto: str, padroes: list[str]) -> str | None:
     return None
 
 
-def extrair_data_referencia(texto: str) -> datetime | None:
-    valor = buscar_primeiro(
-        texto,
-        [
-            r"Data de referência[:\s]+(\d{2}/\d{2}/\d{4})",
-            r"DATA DE REFER[ÊE]NCIA[:\s]+(\d{2}/\d{2}/\d{4})",
-        ],
-    )
-    if valor:
-        return datetime.strptime(valor, "%d/%m/%Y")
+def extrair_data_referencia(texto: str):
+    padroes = [
+        r"Data de referência[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"DATA DE REFER[ÊE]NCIA[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"AT[ÉE]\s+A\s+DATA\s+DE\s+(\d{2}/\d{2}/\d{4})",
+        r"RESUMO DO TEMPO DE SERVIÇO DO MILITAR AT[ÉE] A DATA DE\s+(\d{2}/\d{2}/\d{4})",
+        r"\b(\d{2}/\d{2}/\d{4})\b",
+    ]
+
+    for padrao in padroes:
+        m = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), "%d/%m/%Y")
+            except ValueError:
+                pass
     return None
 
 
