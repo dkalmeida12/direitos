@@ -7,6 +7,7 @@ import pdfplumber
 import streamlit as st
 from openpyxl import load_workbook
 
+
 st.set_page_config(page_title="Cálculo PMMG", layout="wide")
 
 
@@ -23,21 +24,12 @@ def extrair_texto_pdf(pdf_file) -> str:
     return texto
 
 
-def buscar_primeiro(texto: str, padroes: list[str]) -> str | None:
-    for padrao in padroes:
-        m = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
 def extrair_data_referencia(texto: str):
     padroes = [
         r"Data de referência[:\s]+(\d{2}/\d{2}/\d{4})",
         r"DATA DE REFER[ÊE]NCIA[:\s]+(\d{2}/\d{2}/\d{4})",
         r"AT[ÉE]\s+A\s+DATA\s+DE\s+(\d{2}/\d{2}/\d{4})",
         r"RESUMO DO TEMPO DE SERVIÇO DO MILITAR AT[ÉE] A DATA DE\s+(\d{2}/\d{2}/\d{4})",
-        r"\b(\d{2}/\d{2}/\d{4})\b",
     ]
 
     for padrao in padroes:
@@ -51,13 +43,17 @@ def extrair_data_referencia(texto: str):
 
 
 def extrair_anos_dias_label(texto: str, label_regex: str) -> tuple[int, int]:
-    m = re.search(
+    padroes = [
+        rf"{label_regex}\s*:\s*(\d+)\s+(\d+)",
+        rf"{label_regex}\s+(\d+)\s+(\d+)",
         rf"{label_regex}.*?(\d+)\s+anos.*?(\d+)\s+dias",
-        texto,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        return int(m.group(1)), int(m.group(2))
+    ]
+
+    for padrao in padroes:
+        m = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+
     return 0, 0
 
 
@@ -65,22 +61,64 @@ def anos_dias_para_dias(anos: int, dias: int) -> int:
     return anos * 365 + dias
 
 
+def extrair_nome(texto: str) -> str:
+    m = re.search(r"NOME:\s*(.+)", texto)
+    return m.group(1).strip() if m else ""
+
+
+def extrair_posto(texto: str) -> str:
+    m = re.search(r"POSTO OU GRADUAÇÃO:\s*(.+?)(?:\s+NÚMERO PM:|$)", texto)
+    return m.group(1).strip() if m else ""
+
+
 # =========================================================
-# CÁLCULO
+# REGRA DE NEGÓCIO
 # =========================================================
 
-def calcular_data_marco(data_ref: datetime, total_dias: int, marco_dias: int) -> datetime:
-    excesso = total_dias - marco_dias
+def calcular_data_marco(data_ref: datetime, total_dias_ajustado: int, marco_dias: int) -> datetime:
+    excesso = total_dias_ajustado - marco_dias
     return data_ref - timedelta(days=excesso)
 
 
-def calcular_data_quinquenio(data_ref: datetime, total_dias: int, numero: int) -> datetime:
+def calcular_data_quinquenio(data_ref: datetime, total_dias_ajustado: int, numero: int) -> datetime:
     marco = numero * 1825
-    return calcular_data_marco(data_ref, total_dias, marco)
+    return calcular_data_marco(data_ref, total_dias_ajustado, marco)
 
 
-def calcular_data_trintenario(data_ref: datetime, total_dias: int) -> datetime:
-    return calcular_data_marco(data_ref, total_dias, 10950)
+def calcular_data_trintenario(data_ref: datetime, total_dias_ajustado: int) -> datetime:
+    return calcular_data_marco(data_ref, total_dias_ajustado, 10950)
+
+
+def extrair_ferias_anuais_nao_gozadas_simples(texto: str) -> int:
+    """
+    Soma os dias simples da seção:
+    FÉRIAS ANUAIS – NÃO GOZADAS
+    """
+    linhas = texto.splitlines()
+    captura = False
+    total = 0
+
+    for linha in linhas:
+        linha_up = linha.upper().strip()
+
+        if "FÉRIAS ANUAIS" in linha_up and "NÃO GOZADAS" in linha_up:
+            captura = True
+            continue
+
+        if captura and (
+            "RESUMO DO TEMPO DE SERVIÇO" in linha_up
+            or "FÉRIAS ANUAIS CONTADAS DE FORMA SIMPLES" in linha_up
+            or "FÉRIAS ANUAIS CONTADAS EM DOBRO" in linha_up
+        ):
+            break
+
+        if captura:
+            m = re.search(r"^\s*(\d{4})\s+(\d+)\s+(DOBRO|SIMPLES)?\s*$", linha, re.IGNORECASE)
+            if m:
+                dias = int(m.group(2))
+                total += dias
+
+    return total
 
 
 def diff_ymd(data_inicial: datetime, data_final: datetime) -> tuple[int, int, int]:
@@ -93,7 +131,7 @@ def diff_ymd(data_inicial: datetime, data_final: datetime) -> tuple[int, int, in
 
 
 # =========================================================
-# EXPORTAÇÃO EXCEL
+# PREENCHIMENTO DO MODELO EXCEL
 # =========================================================
 
 def preencher_modelo_excel(
@@ -101,13 +139,9 @@ def preencher_modelo_excel(
     nome: str,
     posto: str,
     data_ref: datetime,
-    efetivo_dias: int,
-    acrescimos_dias: int,
-    ferias_anuais_simples: int,
-    ferias_premio_simples: int,
-    arredondamento: int,
-    descontos: int,
-    total_final: int,
+    total_sirh_dias: int,
+    ferias_nao_gozadas_simples: int,
+    total_ajustado_dias: int,
     data_6qq: datetime,
     data_trint: datetime,
 ) -> BytesIO:
@@ -117,17 +151,11 @@ def preencher_modelo_excel(
     ws["B2"] = nome
     ws["B3"] = posto
     ws["B4"] = data_ref.strftime("%d/%m/%Y")
-
-    ws["B6"] = efetivo_dias
-    ws["B7"] = acrescimos_dias
-    ws["B8"] = ferias_anuais_simples
-    ws["B9"] = ferias_premio_simples
-    ws["B10"] = arredondamento
-    ws["B11"] = descontos
-    ws["B12"] = total_final
-
-    ws["B14"] = data_6qq.strftime("%d/%m/%Y")
-    ws["B15"] = data_trint.strftime("%d/%m/%Y")
+    ws["B6"] = total_sirh_dias
+    ws["B7"] = ferias_nao_gozadas_simples
+    ws["B8"] = total_ajustado_dias
+    ws["B10"] = data_6qq.strftime("%d/%m/%Y")
+    ws["B11"] = data_trint.strftime("%d/%m/%Y")
 
     output = BytesIO()
     wb.save(output)
@@ -140,87 +168,80 @@ def preencher_modelo_excel(
 # =========================================================
 
 st.title("Cálculo de Quinquênio / Trintenário - PMMG")
+st.write("Base: PDF do SIRH, com exclusão apenas das férias anuais não gozadas.")
 
-st.write("Envie o PDF do SIRH e informe os campos necessários para reproduzir a lógica da planilha manual.")
+pdf_file = st.file_uploader("Envie o PDF do SIRH", type=["pdf"])
 
-pdf_file = st.file_uploader("PDF do SIRH", type=["pdf"])
-
-st.subheader("Campos editáveis da planilha")
-col1, col2 = st.columns(2)
-
-with col1:
-    nome_manual = st.text_input("Nome")
-    posto_manual = st.text_input("Posto / Graduação")
-    ferias_anuais_simples = st.number_input("Férias anuais não gozadas (dias simples)", min_value=0, value=0, step=1)
-    ferias_premio_simples = st.number_input("Férias-prêmio não gozadas (dias simples)", min_value=0, value=0, step=1)
-
-with col2:
-    arredondamento = st.number_input("Arredondamento (dias)", min_value=0, value=0, step=1)
-    descontos = st.number_input("Descontos (dias)", min_value=0, value=0, step=1)
-
-modelo_excel = "/mnt/data/modelo_planilha_oficial.xlsx"
+modelo_excel = "modelo_planilha_oficial.xlsx"
 
 if pdf_file is not None:
     texto = extrair_texto_pdf(pdf_file)
 
+    texto_upper = texto.upper()
+    marcadores = [
+        "RESUMO DO TEMPO DE SERVIÇO",
+        "TOTAL DE ANOS DE SERVIÇO",
+        "TOTAL DE ACRÉSCIMOS LEGAIS",
+    ]
+    if not any(m in texto_upper for m in marcadores):
+        st.error("O arquivo enviado não parece ser um PDF de contagem de tempo do SIRH.")
+        st.stop()
+
+    nome = extrair_nome(texto)
+    posto = extrair_posto(texto)
     data_ref = extrair_data_referencia(texto)
 
-    efetivo_anos, efetivo_dias_rest = extrair_anos_dias_label(
+    total_anos, total_dias_rest = extrair_anos_dias_label(
         texto,
-        r"Tempo de Efetivo Serviço"
-    )
-    acresc_anos, acresc_dias_rest = extrair_anos_dias_label(
-        texto,
-        r"TOTAL DE ACR[ÉE]SCIMOS LEGAIS"
-    )
-
-    efetivo_dias = anos_dias_para_dias(efetivo_anos, efetivo_dias_rest)
-    acrescimos_dias = anos_dias_para_dias(acresc_anos, acresc_dias_rest)
-
-    total_sirh = efetivo_dias + acrescimos_dias
-
-    total_final = (
-        total_sirh
-        + (ferias_anuais_simples * 2)
-        + (ferias_premio_simples * 2)
-        + arredondamento
-        - descontos
+        r"TOTAL DE ANOS DE SERVIÇO"
     )
 
     if data_ref is None:
         st.error("Não foi possível localizar a data de referência no PDF.")
         st.stop()
 
-    data_6qq = calcular_data_quinquenio(data_ref, total_final, 6)
-    data_trint = calcular_data_trintenario(data_ref, total_final)
+    if total_anos == 0 and total_dias_rest == 0:
+        st.error("Não foi possível localizar o campo 'TOTAL DE ANOS DE SERVIÇO' no PDF.")
+        st.stop()
+
+    total_sirh_dias = anos_dias_para_dias(total_anos, total_dias_rest)
+
+    ferias_nao_gozadas_simples = extrair_ferias_anuais_nao_gozadas_simples(texto)
+    ferias_nao_gozadas_em_dobro = ferias_nao_gozadas_simples * 2
+
+    total_ajustado_dias = total_sirh_dias - ferias_nao_gozadas_em_dobro
+
+    data_6qq = calcular_data_quinquenio(data_ref, total_ajustado_dias, 6)
+    data_trint = calcular_data_trintenario(data_ref, total_ajustado_dias)
 
     st.subheader("Auditoria")
     auditoria = pd.DataFrame(
         [
+            ["Nome", nome],
+            ["Posto / Graduação", posto],
             ["Data de referência", data_ref.strftime("%d/%m/%Y")],
-            ["Efetivo (dias)", efetivo_dias],
-            ["Acréscimos legais (dias)", acrescimos_dias],
-            ["Total SIRH (dias)", total_sirh],
-            ["Férias anuais em dobro", ferias_anuais_simples * 2],
-            ["Férias-prêmio em dobro", ferias_premio_simples * 2],
-            ["Arredondamento", arredondamento],
-            ["Descontos", descontos],
-            ["Total final computável", total_final],
+            ["Total do SIRH (anos)", total_anos],
+            ["Total do SIRH (dias excedentes)", total_dias_rest],
+            ["Total do SIRH em dias", total_sirh_dias],
+            ["Férias anuais não gozadas (simples)", ferias_nao_gozadas_simples],
+            ["Férias anuais não gozadas (em dobro)", ferias_nao_gozadas_em_dobro],
+            ["Total ajustado em dias", total_ajustado_dias],
         ],
         columns=["Campo", "Valor"]
     )
     st.dataframe(auditoria, use_container_width=True)
 
-    st.subheader("Resultado")
+    st.subheader("Resultado principal")
     st.write(f"**6º Quinquênio:** {data_6qq.strftime('%d/%m/%Y')}")
-    st.write(f"**Adicional Trintenário:** {data_trint.strftime('%d/%m/%Y')}")
+    st.write(f"**Adicional trintenário:** {data_trint.strftime('%d/%m/%Y')}")
 
     st.subheader("Demais quinquênios")
     resultados = []
     for i in range(1, 10):
-        dt = calcular_data_quinquenio(data_ref, total_final, i)
+        dt = calcular_data_quinquenio(data_ref, total_ajustado_dias, i)
         status = "Adquirido" if dt.date() <= data_ref.date() else "Futuro"
         anos, meses, dias = diff_ymd(data_ref, dt) if dt > data_ref else (0, 0, 0)
+
         resultados.append(
             {
                 "Quinquênio": f"{i}º",
@@ -232,22 +253,15 @@ if pdf_file is not None:
 
     st.dataframe(pd.DataFrame(resultados), use_container_width=True)
 
-    nome_export = nome_manual.strip() if nome_manual.strip() else "Sem nome"
-    posto_export = posto_manual.strip() if posto_manual.strip() else "Não informado"
-
     try:
         excel_bytes = preencher_modelo_excel(
             caminho_modelo=modelo_excel,
-            nome=nome_export,
-            posto=posto_export,
+            nome=nome or "Sem nome",
+            posto=posto or "Não informado",
             data_ref=data_ref,
-            efetivo_dias=efetivo_dias,
-            acrescimos_dias=acrescimos_dias,
-            ferias_anuais_simples=ferias_anuais_simples,
-            ferias_premio_simples=ferias_premio_simples,
-            arredondamento=arredondamento,
-            descontos=descontos,
-            total_final=total_final,
+            total_sirh_dias=total_sirh_dias,
+            ferias_nao_gozadas_simples=ferias_nao_gozadas_simples,
+            total_ajustado_dias=total_ajustado_dias,
             data_6qq=data_6qq,
             data_trint=data_trint,
         )
@@ -259,4 +273,4 @@ if pdf_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except FileNotFoundError:
-        st.warning("Modelo Excel não encontrado em /mnt/data/modelo_planilha_oficial.xlsx")
+        st.warning("Modelo Excel não encontrado na raiz do projeto: modelo_planilha_oficial.xlsx")
