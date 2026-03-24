@@ -8,7 +8,7 @@ Aplicativo web em **Streamlit** para calcular datas de aquisição de direitos f
 
 | Direito | Base Legal | Critério |
 |---|---|---|
-| Quinquênios | Art. 63 – Lei 5.301/69 | +5% a cada 5 anos de **anos de serviço** |
+| Quinquênios | Art. 63 – Lei 5.301/69 | +10% a cada 5 anos de **anos de serviço** |
 | Adicional Trintenário | Art. 64 – Lei 5.301/69 | +10% ao completar 30 **anos de serviço** |
 | Abono de Permanência | Art. 204 §2º / Art. 220 §único – Lei 5.301/69 | 1/3 dos vencimentos ao atingir os requisitos para reserva voluntária |
 | Transferência Voluntária para Reserva | Art. 136, II – Lei 5.301/69 | 35 anos de serviço e 30 anos de atividade militar |
