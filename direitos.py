@@ -1,698 +1,506 @@
-import io
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass, asdict
 from datetime import date, timedelta
+from typing import Optional, List, Dict, Tuple
 
 import pdfplumber
 import streamlit as st
 
-
-st.set_page_config(page_title="Calculadora de Direitos – PMMG", page_icon="🪖", layout="centered")
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ESTILO
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    """
-<style>
-    .block-container { padding-top: 2rem; }
-    .header-banner {
-        background: linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%);
-        color: white; padding: 1.5rem 2rem; border-radius: 12px; margin-bottom: 1.5rem;
-    }
-    .header-banner h1 { margin: 0; font-size: 1.6rem; }
-    .header-banner p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.82; }
-    .militar-card {
-        background: white; border-left: 5px solid #0f3460; border-radius: 8px;
-        padding: 1rem 1.5rem; margin-bottom: 1.2rem; box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-    }
-    .militar-card h3 { margin: 0 0 0.5rem; color: #0f3460; }
-    .info-row { display: flex; gap: 2rem; flex-wrap: wrap; }
-    .info-item { font-size: 0.9rem; color: #444; }
-    .info-item span { font-weight: 600; color: #1a1a2e; }
-    .section-title {
-        font-size: 1.05rem; font-weight: 700; color: #0f3460;
-        border-bottom: 2px solid #0f3460; padding-bottom: 0.3rem; margin: 1.5rem 0 0.8rem;
-    }
-    .right-card {
-        border-radius: 10px; padding: 0.9rem 1.2rem; margin-bottom: 0.7rem;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.07);
-    }
-    .right-card.acquired { background: #e8f5e9; border-left: 5px solid #2e7d32; }
-    .right-card.future   { background: #e3f2fd; border-left: 5px solid #1565c0; }
-    .right-card.far      { background: #fafafa;  border-left: 5px solid #9e9e9e; }
-    .rc-title { font-size: 0.98rem; font-weight: 700; margin-bottom: 0.15rem; }
-    .right-card.acquired .rc-title { color: #2e7d32; }
-    .right-card.future   .rc-title { color: #1565c0; }
-    .right-card.far      .rc-title { color: #555; }
-    .rc-date { font-size: 0.88rem; color: #333; line-height: 1.5; }
-    .rc-badge {
-        display: inline-block; font-size: 0.72rem; font-weight: 600;
-        padding: 0.12rem 0.55rem; border-radius: 20px; margin-top: 0.4rem;
-    }
-    .badge-acquired { background: #2e7d32; color: white; }
-    .badge-future   { background: #1565c0; color: white; }
-    .badge-far      { background: #757575; color: white; }
-    .time-table {
-        background: white; border-radius: 8px; padding: 0.9rem 1.4rem;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.07); margin-bottom: 0.8rem;
-    }
-    .time-row {
-        display: flex; justify-content: space-between; padding: 0.3rem 0;
-        border-bottom: 1px solid #f0f0f0; font-size: 0.87rem; gap: 1rem;
-    }
-    .time-row:last-child { border-bottom: none; }
-    .t-label { color: #555; }
-    .t-value { font-weight: 600; color: #1a1a2e; text-align: right; }
-    .warn-box {
-        border-radius: 6px; padding: 0.75rem 1rem;
-        font-size: 0.82rem; margin-bottom: 0.8rem;
-    }
-    .warn-box.orange { background: #fff3e0; border-left: 4px solid #e65100; color: #4e342e; }
-    .warn-box.blue   { background: #e8eaf6; border-left: 4px solid #3949ab; color: #1a237e; }
-    .warn-box.green  { background: #e8f5e9; border-left: 4px solid #2e7d32; color: #1b5e20; }
-    .disclaimer {
-        background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 6px;
-        padding: 0.8rem 1rem; font-size: 0.81rem; color: #5d4037; margin-top: 1.5rem;
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CONSTANTES / REGRAS
-# ──────────────────────────────────────────────────────────────────────────────
 EC57_CORTE = date(2003, 7, 15)
-DIAS_POR_ANO_LEGAL = 365
-QUINQUENIO_DIAS = 5 * DIAS_POR_ANO_LEGAL
-TRINTENARIO_DIAS = 30 * DIAS_POR_ANO_LEGAL
-RESERVA_TOTAL_DIAS = 35 * DIAS_POR_ANO_LEGAL
-RESERVA_EFETIVO_DIAS = 30 * DIAS_POR_ANO_LEGAL
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# HELPERS DE DATA / FORMATAÇÃO
-# ──────────────────────────────────────────────────────────────────────────────
-def td(anos: int, dias: int) -> int:
-    return anos * DIAS_POR_ANO_LEGAL + dias
-
+# =============================
+# Helpers
+# =============================
 
 def fmt_date(d: date) -> str:
-    months = [
+    meses = [
         "janeiro", "fevereiro", "março", "abril", "maio", "junho",
-        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
     ]
-    return f"{d.day} de {months[d.month - 1]} de {d.year}"
+    return f"{d.day} de {meses[d.month - 1]} de {d.year}"
 
 
-def fmt_anos_dias(total_dias: int) -> str:
-    anos = total_dias // DIAS_POR_ANO_LEGAL
-    dias = total_dias % DIAS_POR_ANO_LEGAL
-    return f"{anos} anos e {dias} dias"
+def fmt_ddmmyyyy(d: date) -> str:
+    return d.strftime("%d/%m/%Y")
+
+
+def legal_days(anos: int, dias: int) -> int:
+    """Converte a fração anual jurídica (365) para dias.
+    Mantido porque o próprio SIRH resume os tempos como anos + dias nessa base.
+    """
+    return anos * 365 + dias
+
+
+def parse_date_br(s: str) -> date:
+    d, m, y = s.split("/")
+    return date(int(y), int(m), int(d))
+
+
+def inclusive_days(start: date, end: date) -> int:
+    return (end - start).days + 1
+
+
+def days_to_anos_dias(n: int) -> Tuple[int, int]:
+    return n // 365, n % 365
 
 
 def days_label(n: int) -> str:
-    a, d = abs(n) // DIAS_POR_ANO_LEGAL, abs(n) % DIAS_POR_ANO_LEGAL
-    return f"{a}a {d}d" if a else f"{abs(n)}d"
+    n = abs(n)
+    a, d = divmod(n, 365)
+    return f"{a}a {d}d" if a else f"{d}d"
 
 
-def kind(target: date, ref: date) -> str:
-    if target <= ref:
-        return "acquired"
-    return "future" if (target - ref).days <= QUINQUENIO_DIAS else "far"
-
-
-def card(title: str, sub: str, badge: str, kind_name: str) -> str:
-    return (
-        f'<div class="right-card {kind_name}">'
-        f'<div class="rc-title">{title}</div>'
-        f'<div class="rc-date">{sub}</div>'
-        f'<span class="rc-badge badge-{kind_name}">{badge}</span></div>'
-    )
-
-
-def add_calendar_years_safe(d: date, years: int) -> date:
-    """Soma anos civis, tratando 29/02 em anos não bissextos."""
-    try:
-        return d.replace(year=d.year + years)
-    except ValueError:
-        # 29/02 -> 28/02 em ano não bissexto
-        return d.replace(month=2, day=28, year=d.year + years)
-
-
-def estimated_start_from_elapsed(end_date: date, elapsed_days: int) -> date:
-    """
-    Reconstrói a data inicial com contagem inclusiva.
-    Ex.: 31/01/2000 até 06/03/2026 = 9532 dias  ->  start = end - (9532 - 1)
-    """
-    if elapsed_days <= 0:
-        return end_date
-    return end_date - timedelta(days=elapsed_days - 1)
-
-
-def attained_date_from_total(ref: date, total_days: int, marco_days: int) -> date:
-    """
-    Data histórica em que o marco foi atingido.
-    Mantém a coerência com a metodologia da planilha: marco legal em dias de 365,
-    e projeção/reconstrução por diferença em dias corridos no calendário.
-    """
-    return ref - timedelta(days=(total_days - marco_days))
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PARSERS
-# ──────────────────────────────────────────────────────────────────────────────
-def normalize_spaces(text: str) -> str:
-    text = text.replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
+def normalize_text(text: str) -> str:
+    text = text.replace("\r", "")
+    text = re.sub(r"[\t\xa0]+", " ", text)
+    text = re.sub(r" +", " ", text)
     return text
 
 
-def extract_text_from_pdf(file_obj) -> str:
-    with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
-        pages = [(p.extract_text() or "") for p in pdf.pages]
-    return normalize_spaces("\n".join(pages))
+def extract_text_from_pdf(file) -> str:
+    texts: List[str] = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            texts.append(txt)
+    return normalize_text("\n".join(texts))
 
 
-def parse_anos_dias(keyword: str, text: str) -> tuple[int, int]:
-    for line in text.split("\n"):
-        if keyword.upper() in line.upper():
-            m = re.search(r":\s*(\d+)\s+(\d+)\s*$", line)
-            if m:
-                return int(m.group(1)), int(m.group(2))
-    return 0, 0
+def section_between(text: str, start_pat: str, end_pat: str) -> str:
+    pattern = rf"{start_pat}(.*?){end_pat}"
+    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    return m.group(1) if m else ""
 
 
-def parse_single_int(pattern: str, text: str, flags: int = re.IGNORECASE) -> int:
-    m = re.search(pattern, text, flags)
-    return int(m.group(1)) if m else 0
-
-
-def parse_section_sum(text: str, section_title_pattern: str, row_pattern: str) -> int:
-    m = re.search(section_title_pattern, text, re.IGNORECASE | re.DOTALL)
-    if not m:
-        return 0
-    block = m.group(0)
+def sum_numbers_before_keyword(block: str, keyword: str) -> int:
     total = 0
-    for v in re.findall(row_pattern, block, re.IGNORECASE | re.MULTILINE):
-        total += int(v)
+    for line in block.splitlines():
+        if keyword.lower() in line.lower():
+            nums = re.findall(r"\b\d+\b", line)
+            if nums:
+                total += int(nums[-1])
     return total
 
 
-def parse_nome(text: str) -> str:
-    m = re.search(r"NOME:\s*(.+)", text, re.IGNORECASE)
-    return m.group(1).strip() if m else "Não identificado"
+def parse_anos_dias_after(label_regex: str, text: str) -> Tuple[int, int]:
+    patterns = [
+        rf"{label_regex}\s*:?\s*(\d+)\s+(\d+)",
+        rf"{label_regex}.*?\n\s*(\d+)\s+(\d+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return 0, 0
 
 
-def parse_posto(text: str) -> str:
-    m = re.search(r"POSTO\s+OU\s+GRADUA[ÇC][ÃA]O:\s*(.+?)\s+N[ÚU]MERO\s+PM", text, re.IGNORECASE)
-    return m.group(1).strip() if m else "—"
+@dataclass
+class ParsedData:
+    nome: str
+    posto: str
+    numero_pm: str
+    quadro: str
+    unidade: str
+    data_referencia: date
+
+    efetivo_anos: int
+    efetivo_dias: int
+    tempo_deduzir_anos: int
+    tempo_deduzir_dias: int
+    total_anos_servico: int
+    total_dias_servico: int
+    acrescimos_anos: int
+    acrescimos_dias: int
+    arredondamento_dias: int
+
+    ferias_anuais_vantagem_simples: int
+    ferias_anuais_nao_gozadas_simples: int
+    ferias_premio_contadas_simples: int
+    ferias_premio_nao_gozadas_simples: int
+    servico_publico_averbado_dias: int
+    servico_inss_averbado_dias: int
+
+    @property
+    def efetivo_total_dias(self) -> int:
+        return legal_days(self.efetivo_anos, self.efetivo_dias)
+
+    @property
+    def tempo_deduzir_total_dias(self) -> int:
+        return legal_days(self.tempo_deduzir_anos, self.tempo_deduzir_dias)
+
+    @property
+    def total_servico_total_dias(self) -> int:
+        return legal_days(self.total_anos_servico, self.total_dias_servico)
+
+    @property
+    def acrescimos_total_dias(self) -> int:
+        return legal_days(self.acrescimos_anos, self.acrescimos_dias)
+
+    @property
+    def ingresso_estimado(self) -> date:
+        # contagem inclusiva: de start até ref = efetivo_total_dias
+        return self.data_referencia - timedelta(days=self.efetivo_total_dias - 1)
 
 
-def parse_numero_pm(text: str) -> str:
-    m = re.search(r"N[ÚU]MERO\s+PM:\s*([\d.\-]+)", text, re.IGNORECASE)
-    return m.group(1).strip() if m else "—"
+def parse_sirh_pdf(text: str) -> ParsedData:
+    nome = re.search(r"NOME:\s*(.+)", text, re.IGNORECASE)
+    posto = re.search(r"POSTO\s+OU\s+GRADUA[ÇC][ÃA]O:\s*(.+?)\s+N[ÚU]MERO\s+PM", text, re.IGNORECASE)
+    numero_pm = re.search(r"N[ÚU]MERO\s+PM:\s*([\d.\-]+)", text, re.IGNORECASE)
+    quadro = re.search(r"PERTENCE\s+AO\s+QUADRO:\s*(\S+)", text, re.IGNORECASE)
+    unidade = re.search(r"UNIDADE:\s*(.+)", text, re.IGNORECASE)
 
+    ref_m = re.search(r"AT[ÉE]\s+A\s+DATA\s+DE\s+(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+    if not ref_m:
+        ref_m = re.search(r"DATA DE\s+(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+    ref = parse_date_br(ref_m.group(1)) if ref_m else date.today()
 
-def parse_quadro(text: str) -> str:
-    m = re.search(r"PERTENCE\s+AO\s+QUADRO:\s*(\S+)", text, re.IGNORECASE)
-    return m.group(1).strip() if m else "—"
+    efetivo_anos, efetivo_dias = parse_anos_dias_after(r"TOTAL DO TEMPO DE EFETIVO SERVI[ÇC]O NA PMMG", text)
+    ded_anos, ded_dias = parse_anos_dias_after(r"Tempo a deduzir", text)
+    acres_anos, acres_dias = parse_anos_dias_after(r"TOTAL DE ACR[ÉE]SCIMOS LEGAIS", text)
+    total_anos, total_dias = parse_anos_dias_after(r"TOTAL DE ANOS DE SERVI[ÇC]O", text)
+    arred_anos, arred_dias = parse_anos_dias_after(r"Arredondamento \(at[ée] 182 dias\)", text)
+    arredondamento_dias = legal_days(arred_anos, arred_dias)
 
-
-def parse_unidade(text: str) -> str:
-    m = re.search(r"UNIDADE:\s*(.+)", text, re.IGNORECASE)
-    return m.group(1).strip() if m else "—"
-
-
-def parse_data_referencia(text: str) -> date:
-    m = re.search(r"ATÉ A DATA DE\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"DATA DE\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
-    if not m:
-        return date.today()
-    d, mo, y = m.group(1).split("/")
-    return date(int(y), int(mo), int(d))
-
-
-def parse_pdf(file_obj) -> dict | None:
-    try:
-        text = extract_text_from_pdf(file_obj)
-    except Exception as exc:
-        st.error(f"Erro ao ler o PDF: {exc}")
-        return None
-
-    if "CONTAGEM DE TEMPO" not in text.upper():
-        st.error("O arquivo não parece ser um relatório de Contagem de Tempo da PMMG.")
-        return None
-
-    nome = parse_nome(text)
-    posto = parse_posto(text)
-    numero_pm = parse_numero_pm(text)
-    quadro = parse_quadro(text)
-    unidade = parse_unidade(text)
-    data_referencia = parse_data_referencia(text)
-
-    efetivo_anos, efetivo_dias = parse_anos_dias("TOTAL DO TEMPO DE EFETIVO SERVI", text)
-    acrescimo_anos, acrescimo_dias = parse_anos_dias("TOTAL DE ACR", text)
-    total_anos, total_dias = parse_anos_dias("TOTAL DE ANOS DE SERVI", text)
-
-    efetivo_total_dias = td(efetivo_anos, efetivo_dias)
-    acrescimo_total_dias = td(acrescimo_anos, acrescimo_dias)
-    total_servico_dias = td(total_anos, total_dias)
-
-    # Componentes informativos extraídos do SIRH
-    ferias_anuais_simples = parse_single_int(r"Férias anuais contadas de forma simples:\s*(\d+)\s+(\d+)", text)
-    ferias_anuais_dobro = 0
-    m_fad = re.search(r"Férias anuais contadas em dobro:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    if m_fad:
-        ferias_anuais_dobro = td(int(m_fad.group(1)), int(m_fad.group(2)))
-
-    m_fps = re.search(r"Férias-prêmio contadas de forma simples:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    ferias_premio_simples = td(int(m_fps.group(1)), int(m_fps.group(2))) if m_fps else 0
-
-    m_fpd = re.search(r"Férias-prêmio contadas em dobro:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    ferias_premio_dobro = td(int(m_fpd.group(1)), int(m_fpd.group(2))) if m_fpd else 0
-
-    m_avb = re.search(r"Tempo de serviço público averbado:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    averbado_publico = td(int(m_avb.group(1)), int(m_avb.group(2))) if m_avb else 0
-
-    m_inss = re.search(r"Tempo averbado vinculado ao INSS:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    averbado_inss = td(int(m_inss.group(1)), int(m_inss.group(2))) if m_inss else 0
-
-    m_arred = re.search(r"Arredondamento \(até 182 dias\):\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
-    arredondamento_dias = td(int(m_arred.group(1)), int(m_arred.group(2))) if m_arred else 0
-
-    # Entrada auxiliar: apenas para transparência. Não é usado para subtrair nada.
-    bloco_nao_gozadas = re.search(
-        r"FÉRIAS ANUAIS\s*[–-]\s*NÃO GOZADAS.*?(?=RESUMO|FÉRIAS\s+PRÊMIO\s+NÃO|$)",
+    # Férias anuais – VANTAGEM
+    bloco_fa_vant = section_between(
         text,
-        re.IGNORECASE | re.DOTALL,
+        r"F[ÉE]RIAS\s+ANUAIS\s*[–-]\s*VANTAGEM",
+        r"F[ÉE]RIAS\s+ANUAIS\s*[–-]\s*N[ÃA]O\s+GOZADAS",
     )
-    ferias_anuais_nao_gozadas_simples = 0
-    if bloco_nao_gozadas:
-        for dias in re.findall(r"^\d{4}\s+(\d+)\s+Dobro", bloco_nao_gozadas.group(0), re.MULTILINE | re.IGNORECASE):
-            ferias_anuais_nao_gozadas_simples += int(dias)
+    ferias_anuais_vantagem_simples = sum_numbers_before_keyword(bloco_fa_vant, "Dobro")
 
-    ingresso_estimado = estimated_start_from_elapsed(data_referencia, efetivo_total_dias)
+    # Férias anuais – NÃO GOZADAS
+    bloco_fa_ng = section_between(
+        text,
+        r"F[ÉE]RIAS\s+ANUAIS\s*[–-]\s*N[ÃA]O\s+GOZADAS",
+        r"RESUMO\s+DO\s+TEMPO\s+DE\s+SERVI[ÇC]O",
+    )
+    ferias_anuais_nao_gozadas_simples = sum_numbers_before_keyword(bloco_fa_ng, "Dobro")
 
-    return {
-        "nome": nome,
-        "posto": posto,
-        "numero_pm": numero_pm,
-        "quadro": quadro,
-        "unidade": unidade,
-        "data_referencia": data_referencia,
-        "efetivo_anos": efetivo_anos,
-        "efetivo_dias": efetivo_dias,
-        "efetivo_total_dias": efetivo_total_dias,
-        "acrescimo_anos": acrescimo_anos,
-        "acrescimo_dias": acrescimo_dias,
-        "acrescimo_total_dias": acrescimo_total_dias,
-        "total_anos": total_anos,
-        "total_dias": total_dias,
-        "total_servico_dias": total_servico_dias,
-        "ingresso_estimado": ingresso_estimado,
-        "ferias_anuais_simples": ferias_anuais_simples,
-        "ferias_anuais_dobro": ferias_anuais_dobro,
-        "ferias_premio_simples": ferias_premio_simples,
-        "ferias_premio_dobro": ferias_premio_dobro,
-        "averbado_publico": averbado_publico,
-        "averbado_inss": averbado_inss,
-        "arredondamento_dias": arredondamento_dias,
-        "ferias_anuais_nao_gozadas_simples": ferias_anuais_nao_gozadas_simples,
-        "texto_extraido": text,
+    # Férias-prêmio contadas como tempo
+    bloco_fp_cont = section_between(
+        text,
+        r"F[ÉE]RIAS\s+PR[ÊE]MIO\s*[-–]\s*CONTADAS\s+COMO\s+TEMPO\s+DE\s+SERVI[ÇC]O\s*/\s*VANTAGEM",
+        r"F[ÉE]RIAS\s+PR[ÊE]MIO\s+N[ÃA]O\s+GOZADAS",
+    )
+    # nesse bloco, normalmente cada linha do quinquênio traz 90 dias
+    premio_contadas = []
+    for line in bloco_fp_cont.splitlines():
+        if re.search(r"\bDobro\b", line, re.IGNORECASE):
+            nums = re.findall(r"\b\d+\b", line)
+            if nums:
+                premio_contadas.append(int(nums[-2] if len(nums) >= 2 else nums[-1]))
+    ferias_premio_contadas_simples = sum(premio_contadas)
+
+    # Férias-prêmio não gozadas (se houver listagem)
+    bloco_fp_ng = section_between(
+        text,
+        r"F[ÉE]RIAS\s+PR[ÊE]MIO\s+N[ÃA]O\s+GOZADAS",
+        r"F[ÉE]RIAS\s+ANUAIS\s*[–-]\s*VANTAGEM|RESUMO\s+DO\s+TEMPO\s+DE\s+SERVI[ÇC]O",
+    )
+    ferias_premio_nao_gozadas_simples = sum_numbers_before_keyword(bloco_fp_ng, "Dobro")
+
+    spub_anos, spub_dias = parse_anos_dias_after(r"Tempo de servi[çc]o p[úu]blico averbado", text)
+    inss_anos, inss_dias = parse_anos_dias_after(r"Tempo averbado vinculado ao INSS", text)
+
+    return ParsedData(
+        nome=nome.group(1).strip() if nome else "Não identificado",
+        posto=posto.group(1).strip() if posto else "—",
+        numero_pm=numero_pm.group(1).strip() if numero_pm else "—",
+        quadro=quadro.group(1).strip() if quadro else "—",
+        unidade=unidade.group(1).strip() if unidade else "—",
+        data_referencia=ref,
+        efetivo_anos=efetivo_anos,
+        efetivo_dias=efetivo_dias,
+        tempo_deduzir_anos=ded_anos,
+        tempo_deduzir_dias=ded_dias,
+        total_anos_servico=total_anos,
+        total_dias_servico=total_dias,
+        acrescimos_anos=acres_anos,
+        acrescimos_dias=acres_dias,
+        arredondamento_dias=arredondamento_dias,
+        ferias_anuais_vantagem_simples=ferias_anuais_vantagem_simples,
+        ferias_anuais_nao_gozadas_simples=ferias_anuais_nao_gozadas_simples,
+        ferias_premio_contadas_simples=ferias_premio_contadas_simples,
+        ferias_premio_nao_gozadas_simples=ferias_premio_nao_gozadas_simples,
+        servico_publico_averbado_dias=legal_days(spub_anos, spub_dias),
+        servico_inss_averbado_dias=legal_days(inss_anos, inss_dias),
+    )
+
+
+@dataclass
+class AuditModel:
+    ingresso_estimado: date
+    incluir_anuais_nao_gozadas: bool
+    bonus_fixo_dias: int
+    total_modelo_na_data_base: int
+    diferenca_vs_sirh_total: int
+    detalhes: Dict[str, int]
+
+
+def build_audit_model(
+    data: ParsedData,
+    incluir_anuais_nao_gozadas: bool,
+    ajuste_manual_dias: int,
+) -> AuditModel:
+    detalhes = {
+        "Efetivo serviço (dias)": data.efetivo_total_dias,
+        "Férias anuais – vantagem (simples)": data.ferias_anuais_vantagem_simples,
+        "Férias anuais – vantagem (dobro)": data.ferias_anuais_vantagem_simples * 2,
+        "Férias anuais – não gozadas (simples)": data.ferias_anuais_nao_gozadas_simples,
+        "Férias anuais – não gozadas (dobro)": data.ferias_anuais_nao_gozadas_simples * 2,
+        "Férias-prêmio contadas (simples)": data.ferias_premio_contadas_simples,
+        "Férias-prêmio contadas (dobro)": data.ferias_premio_contadas_simples * 2,
+        "Férias-prêmio não gozadas (simples)": data.ferias_premio_nao_gozadas_simples,
+        "Férias-prêmio não gozadas (dobro)": data.ferias_premio_nao_gozadas_simples * 2,
+        "Serviço público averbado": data.servico_publico_averbado_dias,
+        "Tempo vinculado ao INSS": data.servico_inss_averbado_dias,
+        "Arredondamento": data.arredondamento_dias,
+        "Tempo a deduzir": data.tempo_deduzir_total_dias,
+        "Ajuste manual": ajuste_manual_dias,
     }
 
+    bonus_fixo = (
+        data.ferias_anuais_vantagem_simples * 2
+        + data.ferias_premio_contadas_simples * 2
+        + data.ferias_premio_nao_gozadas_simples * 2
+        + data.servico_publico_averbado_dias
+        + data.servico_inss_averbado_dias
+        + data.arredondamento_dias
+        - data.tempo_deduzir_total_dias
+        + ajuste_manual_dias
+    )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CÁLCULO DOS DIREITOS
-# ──────────────────────────────────────────────────────────────────────────────
-def quinquenio_applicable(ingresso_estimado: date) -> bool:
-    return ingresso_estimado <= EC57_CORTE
+    if incluir_anuais_nao_gozadas:
+        bonus_fixo += data.ferias_anuais_nao_gozadas_simples * 2
+
+    total_modelo = data.efetivo_total_dias + bonus_fixo
+
+    return AuditModel(
+        ingresso_estimado=data.ingresso_estimado,
+        incluir_anuais_nao_gozadas=incluir_anuais_nao_gozadas,
+        bonus_fixo_dias=bonus_fixo,
+        total_modelo_na_data_base=total_modelo,
+        diferenca_vs_sirh_total=total_modelo - data.total_servico_total_dias,
+        detalhes=detalhes,
+    )
 
 
-def compute_rights(data: dict) -> list[dict]:
-    ref = data["data_referencia"]
-    total_servico = data["total_servico_dias"]
-    efetivo = data["efetivo_total_dias"]
-    ingresso = data["ingresso_estimado"]
+def acquisition_date(ref: date, total_na_data_base: int, marco_dias: int) -> date:
+    """Data aquisitiva a partir da data-base do relatório.
+    Se a modelagem estiver correta, a data resultante é invariável em relação à data-base.
+    """
+    excesso = total_na_data_base - marco_dias
+    return ref - timedelta(days=excesso)
 
-    out: list[dict] = []
 
-    # Quinquênios
-    if quinquenio_applicable(ingresso):
-        future_count = 0
-        for q in range(1, 20):
-            marco = q * QUINQUENIO_DIAS
-            if total_servico >= marco:
-                target = attained_date_from_total(ref, total_servico, marco)
-                sub = f"Adquirido em {fmt_date(target)}"
-                badge = "✅ Já adquirido"
-                k = "acquired"
-            else:
-                faltam = marco - total_servico
-                target = ref + timedelta(days=faltam)
-                sub = f"Previsão: {fmt_date(target)} (faltam {days_label(faltam)})"
-                badge = f"⏳ {days_label(faltam)}"
-                k = kind(target, ref)
-                future_count += 1
+def acquisition_date_from_start(start: date, bonus_fixo_dias: int, marco_dias: int) -> date:
+    """Mesma data aquisitiva, mas por busca a partir do ingresso estimado.
+    Mantida como auditoria cruzada de invariância.
+    """
+    # data d tal que dias inclusivos(start, d) + bonus_fixo = marco
+    # logo: dias inclusivos(start, d) = marco - bonus_fixo
+    efetivo_necessario = marco_dias - bonus_fixo_dias
+    return start + timedelta(days=efetivo_necessario - 1)
 
-            out.append(
-                {
-                    "title": f"{q}º Quinquênio — +10% sobre remuneração base",
-                    "sub": sub,
-                    "badge": badge,
-                    "kind": k,
-                    "target": target,
-                    "group": "quinquenio",
-                    "order": q,
-                }
-            )
-            if future_count >= 3:
+
+def quinquenio_items(data: ParsedData, audit: AuditModel, max_future: int = 3) -> List[Dict]:
+    items = []
+    ref = data.data_referencia
+    future_count = 0
+    for q in range(1, 20):
+        marco = q * 5 * 365
+        d1 = acquisition_date(ref, audit.total_modelo_na_data_base, marco)
+        d2 = acquisition_date_from_start(audit.ingresso_estimado, audit.bonus_fixo_dias, marco)
+        miss = marco - audit.total_modelo_na_data_base
+        acquired = miss <= 0
+        items.append(
+            {
+                "marco": f"{q}º quinquênio",
+                "percentual": "+10%",
+                "data_direito": d1,
+                "data_direito_auditoria": d2,
+                "consistente": d1 == d2,
+                "status": "✅ Já adquirido" if acquired else f"⏳ Faltam {days_label(miss)}",
+                "faltam_dias": max(miss, 0),
+            }
+        )
+        if not acquired:
+            future_count += 1
+            if future_count >= max_future:
                 break
-    else:
-        out.append(
-            {
-                "title": "Quinquênio — não aplicável",
-                "sub": (
-                    "Militar enquadrado no regime posterior à EC 57/2003. "
-                    "Para esses casos, a referência principal passa a ser o ADE."
-                ),
-                "badge": "ℹ️ Ver seção ADE",
-                "kind": "far",
-                "target": ref,
-                "group": "quinquenio",
-                "order": 0,
-            }
-        )
+    return items
 
-    # ADE — marco anual em calendário civil
-    # Observação: a concessão depende também das ADIs ≥ 70%.
-    marcos_ade = [
-        (3, "6%", "até 6% (3 ADIs)"),
-        (5, "10%", "até 10% (5 ADIs)"),
-        (10, "20%", "até 20% (10 ADIs)"),
-        (15, "30%", "até 30% (15 ADIs)"),
-        (20, "40%", "até 40% (20 ADIs)"),
-        (25, "50%", "até 50% (25 ADIs)"),
-        (30, "60%", "até 60% na ativa / até 70% na inatividade (30 ADIs)"),
+
+def ade_items(ingresso: date, ref: date) -> List[Dict]:
+    marcos = [
+        (3, "até 6%"),
+        (5, "até 10%"),
+        (10, "até 20%"),
+        (15, "até 30%"),
+        (20, "até 40%"),
+        (25, "até 50%"),
+        (30, "até 60% na ativa / até 70% na inatividade"),
     ]
-    for anos_adi, _pct_curto, pct_label in marcos_ade:
-        target = add_calendar_years_safe(ingresso, anos_adi)
-        miss = (target - ref).days
-        if miss <= 0:
-            sub = (
-                f"Marco temporal atingido em {fmt_date(target)}<br>"
-                f"<em>Requer {anos_adi} ADIs com resultado ≥ 70%</em>"
-            )
-            badge = "✅ Marco temporal atingido"
-            k = "acquired"
-        else:
-            sub = (
-                f"Previsão: {fmt_date(target)} (faltam {days_label(miss)})<br>"
-                f"<em>Requer {anos_adi} ADIs com resultado ≥ 70%</em>"
-            )
-            badge = f"⏳ {days_label(miss)}"
-            k = kind(target, ref)
-
+    out = []
+    for anos, pct in marcos:
+        alvo = date(ingresso.year + anos, ingresso.month, ingresso.day)
+        miss = (alvo - ref).days
         out.append(
             {
-                "title": f"ADE — {pct_label}",
-                "sub": sub,
-                "badge": badge,
-                "kind": k,
-                "target": target,
-                "group": "ade",
-                "order": anos_adi,
+                "marco": f"{anos} ADIs",
+                "percentual": pct,
+                "data": alvo,
+                "status": "✅ Marco temporal atingido" if miss <= 0 else f"⏳ Faltam {days_label(miss)}",
             }
         )
-
-    # Trintenário
-    if total_servico >= TRINTENARIO_DIAS:
-        t30 = attained_date_from_total(ref, total_servico, TRINTENARIO_DIAS)
-        sub30 = f"Adquirido em {fmt_date(t30)}"
-        badge30 = "✅ Já adquirido"
-        k30 = "acquired"
-    else:
-        faltam30 = TRINTENARIO_DIAS - total_servico
-        t30 = ref + timedelta(days=faltam30)
-        sub30 = f"Previsão: {fmt_date(t30)} (faltam {days_label(faltam30)})"
-        badge30 = f"⏳ {days_label(faltam30)}"
-        k30 = kind(t30, ref)
-
-    out.append(
-        {
-            "title": "Adicional Trintenário — +10% sobre remuneração base",
-            "sub": sub30,
-            "badge": badge30,
-            "kind": k30,
-            "target": t30,
-            "group": "trintenario",
-            "order": 0,
-        }
-    )
-
-    # Abono / Reserva
-    faltam_total_35 = max(0, RESERVA_TOTAL_DIAS - total_servico)
-    faltam_ef_30 = max(0, RESERVA_EFETIVO_DIAS - efetivo)
-    days_ab = max(faltam_total_35, faltam_ef_30)
-    target_ab = ref + timedelta(days=days_ab)
-    limiting = (
-        "35 anos de serviço total"
-        if faltam_total_35 >= faltam_ef_30
-        else "30 anos de efetivo exercício militar"
-    )
-
-    if days_ab == 0:
-        sub_ab = f"Adquirido em {fmt_date(target_ab)}"
-        badge_ab = "✅ Já adquirido"
-        kab = "acquired"
-    else:
-        sub_ab = (
-            f"Previsão: {fmt_date(target_ab)} (faltam {days_label(days_ab)})<br>"
-            f"<em>Fator limitante: {limiting}</em>"
-        )
-        badge_ab = f"⏳ {days_label(days_ab)}"
-        kab = kind(target_ab, ref)
-
-    out.append(
-        {
-            "title": "Abono de Permanência — 1/3 dos vencimentos",
-            "sub": sub_ab,
-            "badge": badge_ab,
-            "kind": kab,
-            "target": target_ab,
-            "group": "abono",
-            "order": 0,
-        }
-    )
-    out.append(
-        {
-            "title": "Elegibilidade para Transferência Voluntária à Reserva",
-            "sub": sub_ab,
-            "badge": badge_ab,
-            "kind": kab,
-            "target": target_ab,
-            "group": "reserva",
-            "order": 0,
-        }
-    )
-
     return out
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+def trintenario_item(data: ParsedData, audit: AuditModel) -> Dict:
+    marco = 30 * 365
+    d1 = acquisition_date(data.data_referencia, audit.total_modelo_na_data_base, marco)
+    d2 = acquisition_date_from_start(audit.ingresso_estimado, audit.bonus_fixo_dias, marco)
+    miss = marco - audit.total_modelo_na_data_base
+    return {
+        "marco": "Adicional trintenário",
+        "percentual": "+10%",
+        "data_direito": d1,
+        "data_direito_auditoria": d2,
+        "consistente": d1 == d2,
+        "status": "✅ Já adquirido" if miss <= 0 else f"⏳ Faltam {days_label(miss)}",
+        "faltam_dias": max(miss, 0),
+    }
+
+
+# =============================
 # UI
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    """
-<div class="header-banner">
-    <h1>🪖 Calculadora de Direitos – PMMG</h1>
-    <p>Quinquênio · ADE · Adicional Trintenário · Abono de Permanência · Reserva Voluntária</p>
-    <p style="opacity:0.55;font-size:0.77rem">
-        Lógica ajustada para reproduzir a metodologia da planilha manual: marcos jurídicos em dias de 365,
-        sem subtrair automaticamente férias anuais não gozadas do total informado pelo SIRH.
-    </p>
-</div>
-""",
-    unsafe_allow_html=True,
+# =============================
+
+st.set_page_config(page_title="Direitos PMMG — Auditoria", layout="wide")
+st.title("Cálculo de quinquênio, trintenário e ADE — com auditoria")
+st.caption(
+    "Entrada: certidão/relatório do SIRH. Saída: cálculo auditável, com trilha dos dias usados e dupla validação da data aquisitiva."
 )
 
-uploaded = st.file_uploader("📄 Faça upload do relatório de Contagem de Tempo (PDF – PMMG)", type=["pdf"])
-
-if not uploaded:
-    st.info("👆 Faça upload do relatório PDF de Contagem de Tempo para calcular os direitos.")
+with st.expander("O que esta versão corrige", expanded=False):
     st.markdown(
         """
-| Direito | Quem tem direito | Critério usado no app |
-|---|---|---|
-| Quinquênio | Ingressos até 14/07/2003 | 5 anos de serviço = 1.825 dias |
-| ADE | Regime pós-EC 57/2003 ou optantes | Marcos anuais por ADIs |
-| Adicional Trintenário | Conforme a regra aplicável | 30 anos de serviço = 10.950 dias |
-| Abono / Reserva | Conforme a regra aplicável | 35 anos total + 30 anos de efetivo |
-
-> O PDF do SIRH é a entrada. A metodologia de cálculo foi alinhada para reproduzir a contagem manual oficial, inclusive no tratamento dos marcos em dias e no cuidado com datas em anos bissextos.
-"""
-    )
-    st.stop()
-
-
-data = parse_pdf(uploaded)
-if data is None:
-    st.stop()
-
-rights = compute_rights(data)
-ref = data["data_referencia"]
-ingresso = data["ingresso_estimado"]
-pos_ec57 = ingresso > EC57_CORTE
-
-st.markdown(
-    f"""
-<div class="militar-card">
-    <h3>👤 {data['nome']}</h3>
-    <div class="info-row">
-        <div class="info-item">Posto/Grad.: <span>{data['posto']}</span></div>
-        <div class="info-item">N.º PM: <span>{data['numero_pm']}</span></div>
-        <div class="info-item">Quadro: <span>{data['quadro']}</span></div>
-        <div class="info-item">Unidade: <span>{data['unidade']}</span></div>
-        <div class="info-item">Data-base: <span>{fmt_date(ref)}</span></div>
-        <div class="info-item">Ingresso estimado: <span>{fmt_date(ingresso)}</span></div>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-if pos_ec57:
-    st.markdown(
+- A data aquisitiva não depende da data-base do relatório: o app calcula por duas rotas e compara o resultado.
+- A base de cálculo deixa de usar o `total_corrigido` antigo e passa a montar um **modelo auditável**.
+- O modelo oficial, por padrão, **inclui** férias anuais de vantagem, férias-prêmio, averbações e arredondamento.
+- Por padrão, **exclui** férias anuais não gozadas, porque esse foi o ponto que gerou divergência no caso analisado.
+- Há um ajuste manual em dias para calibrar o modelo em situações excepcionais.
         """
-<div class="warn-box blue">
-    📋 <strong>Regime predominante: ADE.</strong> O militar ficou enquadrado, pela data estimada de ingresso,
-    no regime posterior à EC 57/2003. Por isso, a seção de quinquênio é apenas informativa.
-</div>
-""",
-        unsafe_allow_html=True,
     )
+
+uploaded = st.file_uploader("Anexe o PDF do SIRH", type=["pdf"])
+
+if uploaded:
+    text = extract_text_from_pdf(uploaded)
+    data = parse_sirh_pdf(text)
+
+    with st.sidebar:
+        st.header("Parâmetros de auditoria")
+        incluir_anuais_nao_gozadas = st.checkbox(
+            "Incluir férias anuais não gozadas na base de quinquênio/trintenário",
+            value=False,
+            help="Desative para reproduzir a metodologia manual observada no caso do 6º quinquênio analisado.",
+        )
+        ajuste_manual_dias = st.number_input(
+            "Ajuste manual adicional (dias)",
+            value=0,
+            step=1,
+            help="Use apenas se a unidade adotar algum tratamento específico não capturado pelo PDF.",
+        )
+        max_future = st.slider("Quantidade de marcos futuros exibidos", 1, 6, 3)
+
+    audit = build_audit_model(data, incluir_anuais_nao_gozadas, int(ajuste_manual_dias))
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Militar", data.nome)
+    col2.metric("Data-base do relatório", fmt_ddmmyyyy(data.data_referencia))
+    col3.metric("Ingresso estimado (contagem inclusiva)", fmt_ddmmyyyy(audit.ingresso_estimado))
+
+    st.subheader("Auditoria da base de cálculo")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Efetivo (dias)", data.efetivo_total_dias)
+    a2.metric("Bônus fixo do modelo (dias)", audit.bonus_fixo_dias)
+    a3.metric("Total do modelo na data-base", audit.total_modelo_na_data_base)
+    a4.metric("Total do SIRH na data-base", data.total_servico_total_dias)
+
+    if audit.diferenca_vs_sirh_total != 0:
+        st.warning(
+            f"Diferença entre modelo auditado e total bruto do SIRH: {audit.diferenca_vs_sirh_total:+d} dias. "
+            "É exatamente essa diferença de base que desloca a data do direito."
+        )
+    else:
+        st.success("O total do modelo auditado coincide com o total bruto do SIRH.")
+
+    detalhes_tabela = []
+    for k, v in audit.detalhes.items():
+        detalhes_tabela.append({"Componente": k, "Dias": v})
+    st.dataframe(detalhes_tabela, use_container_width=True, hide_index=True)
+
+    st.subheader("Validação de invariância da data aquisitiva")
+    st.markdown(
+        "A data aquisitiva é calculada por duas rotas independentes: "
+        "(1) retroação a partir da data-base; (2) projeção a partir do ingresso estimado. "
+        "As duas precisam bater."
+    )
+
+    direito_quinquenio = audit.ingresso_estimado <= EC57_CORTE
+
+    if direito_quinquenio:
+        st.subheader("📅 Quinquênios (art. 63)")
+        for item in quinquenio_items(data, audit, max_future=max_future):
+            st.markdown(f"**{item['marco'].title()} — {item['percentual']} sobre remuneração base**")
+            st.write(f"Data do direito: **{fmt_date(item['data_direito'])}**")
+            st.write(f"Auditoria cruzada: {fmt_date(item['data_direito_auditoria'])}")
+            st.write(item["status"])
+            if not item["consistente"]:
+                st.error("Inconsistência entre as duas rotas de cálculo. Revise a base em dias.")
+            st.divider()
+    else:
+        st.info(
+            "Militar com ingresso estimado após 15/07/2003. Nesta modelagem, não se exibe quinquênio; exibe-se ADE."
+        )
+
+    st.subheader("📅 Adicional trintenário (art. 64)")
+    tri = trintenario_item(data, audit)
+    st.markdown(f"**{tri['marco']} — {tri['percentual']} sobre remuneração base**")
+    st.write(f"Data do direito: **{fmt_date(tri['data_direito'])}**")
+    st.write(f"Auditoria cruzada: {fmt_date(tri['data_direito_auditoria'])}")
+    st.write(tri["status"])
+    if not tri["consistente"]:
+        st.error("Inconsistência entre as duas rotas de cálculo. Revise a base em dias.")
+
+    st.subheader("📅 ADE (marcos temporais)")
+    st.caption("O ADE continua condicionado ao cumprimento dos demais requisitos legais e ao resultado das ADIs.")
+    ade_rows = []
+    for row in ade_items(audit.ingresso_estimado, data.data_referencia):
+        ade_rows.append(
+            {
+                "Marco": row["marco"],
+                "% máximo": row["percentual"],
+                "Data": fmt_ddmmyyyy(row["data"]),
+                "Status": row["status"],
+            }
+        )
+    st.dataframe(ade_rows, use_container_width=True, hide_index=True)
+
+    with st.expander("Dados extraídos do PDF", expanded=False):
+        st.json(
+            {
+                **asdict(data),
+                "data_referencia": fmt_ddmmyyyy(data.data_referencia),
+                "ingresso_estimado": fmt_ddmmyyyy(data.ingresso_estimado),
+            }
+        )
+
+    with st.expander("Texto bruto extraído do PDF", expanded=False):
+        st.text(text)
 else:
-    st.markdown(
-        """
-<div class="warn-box green">
-    📋 <strong>Regime predominante: quinquênio.</strong> Pela data estimada de ingresso, o militar se enquadra
-    no regime anterior à EC 57/2003. O ADE continua exibido porque pode existir opção em alguns casos.
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-st.markdown('<div class="section-title">📊 Resumo do Tempo de Serviço</div>', unsafe_allow_html=True)
-
-st.markdown(
-    f"""
-<div class="time-table">
-    <div class="time-row">
-        <span class="t-label">Efetivo Serviço na PMMG</span>
-        <span class="t-value">{data['efetivo_anos']} anos e {data['efetivo_dias']} dias</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Acréscimos legais (SIRH)</span>
-        <span class="t-value">{data['acrescimo_anos']} anos e {data['acrescimo_dias']} dias</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Total de anos de serviço (base dos cálculos)</span>
-        <span class="t-value">{data['total_anos']} anos e {data['total_dias']} dias</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Férias anuais em dobro (informativo)</span>
-        <span class="t-value">{fmt_anos_dias(data['ferias_anuais_dobro'])}</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Férias-prêmio em dobro (informativo)</span>
-        <span class="t-value">{fmt_anos_dias(data['ferias_premio_dobro'])}</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Arredondamento (informativo)</span>
-        <span class="t-value">{fmt_anos_dias(data['arredondamento_dias'])}</span>
-    </div>
-    <div class="time-row">
-        <span class="t-label">Férias anuais não gozadas listadas no PDF</span>
-        <span class="t-value">{data['ferias_anuais_nao_gozadas_simples']} dias simples</span>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-<div class="warn-box orange">
-    ⚠️ <strong>Ponto metodológico adotado:</strong> o app usa como base principal o <strong>Total de anos de serviço</strong>
-    já consolidado no SIRH para os marcos de quinquênio e trintenário. As férias anuais não gozadas são mostradas
-    apenas de forma informativa e <strong>não são subtraídas automaticamente</strong>.
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# Quinquênio
-st.markdown(
-    '<div class="section-title">📅 Quinquênios <small style="font-weight:400;font-size:0.8rem">(art. 63)</small></div>',
-    unsafe_allow_html=True,
-)
-quins = [r for r in rights if r["group"] == "quinquenio"]
-for r in quins:
-    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-# ADE
-st.markdown(
-    '<div class="section-title">📈 ADE <small style="font-weight:400;font-size:0.8rem">(arts. 59-A a 59-C)</small></div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    """
-<div class="warn-box blue">
-    ℹ️ Para o ADE, o app projeta os marcos anuais em <strong>calendário civil</strong>, com tratamento explícito para anos bissextos.
-    A data exibida é o marco temporal; a concessão depende também das ADIs satisfatórias.
-</div>
-""",
-    unsafe_allow_html=True,
-)
-for r in [x for x in rights if x["group"] == "ade"]:
-    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-# Trintenário
-st.markdown(
-    '<div class="section-title">🏅 Adicional Trintenário <small style="font-weight:400;font-size:0.8rem">(art. 64)</small></div>',
-    unsafe_allow_html=True,
-)
-for r in [x for x in rights if x["group"] == "trintenario"]:
-    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-# Abono
-st.markdown(
-    '<div class="section-title">💰 Abono de Permanência <small style="font-weight:400;font-size:0.8rem">(art. 204 §2º / art. 220)</small></div>',
-    unsafe_allow_html=True,
-)
-for r in [x for x in rights if x["group"] == "abono"]:
-    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-# Reserva
-st.markdown(
-    '<div class="section-title">🎖️ Transferência Voluntária à Reserva <small style="font-weight:400;font-size:0.8rem">(art. 136, II)</small></div>',
-    unsafe_allow_html=True,
-)
-for r in [x for x in rights if x["group"] == "reserva"]:
-    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-st.markdown(
-    """
-<div class="disclaimer">
-    ⚠️ <strong>Aviso:</strong> esta versão foi corrigida para eliminar o principal desvio do script anterior:
-    a subtração automática de férias anuais não gozadas e a mistura indevida entre marcos jurídicos em dias
-    e projeções civis sem tratamento claro de anos bissextos. Ainda assim, casos concretos podem exigir ajuste
-    fino conforme a metodologia interna oficialmente adotada pela DAL/PMMG.
-</div>
-""",
-    unsafe_allow_html=True,
-)
+    st.info("Anexe um PDF do SIRH para iniciar a análise.")
