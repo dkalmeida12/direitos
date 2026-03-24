@@ -1,12 +1,19 @@
-import streamlit as st
-import pdfplumber
+import io
 import re
 from datetime import date, timedelta
-import io
+
+import pdfplumber
+import streamlit as st
+
 
 st.set_page_config(page_title="Calculadora de Direitos – PMMG", page_icon="🪖", layout="centered")
 
-st.markdown("""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ESTILO
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown(
+    """
 <style>
     .block-container { padding-top: 2rem; }
     .header-banner {
@@ -14,7 +21,7 @@ st.markdown("""
         color: white; padding: 1.5rem 2rem; border-radius: 12px; margin-bottom: 1.5rem;
     }
     .header-banner h1 { margin: 0; font-size: 1.6rem; }
-    .header-banner p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.8; }
+    .header-banner p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.82; }
     .militar-card {
         background: white; border-left: 5px solid #0f3460; border-radius: 8px;
         padding: 1rem 1.5rem; margin-bottom: 1.2rem; box-shadow: 0 2px 6px rgba(0,0,0,0.08);
@@ -52,29 +59,122 @@ st.markdown("""
     }
     .time-row {
         display: flex; justify-content: space-between; padding: 0.3rem 0;
-        border-bottom: 1px solid #f0f0f0; font-size: 0.87rem;
+        border-bottom: 1px solid #f0f0f0; font-size: 0.87rem; gap: 1rem;
     }
     .time-row:last-child { border-bottom: none; }
     .t-label { color: #555; }
-    .t-value { font-weight: 600; color: #1a1a2e; }
+    .t-value { font-weight: 600; color: #1a1a2e; text-align: right; }
     .warn-box {
         border-radius: 6px; padding: 0.75rem 1rem;
         font-size: 0.82rem; margin-bottom: 0.8rem;
     }
     .warn-box.orange { background: #fff3e0; border-left: 4px solid #e65100; color: #4e342e; }
     .warn-box.blue   { background: #e8eaf6; border-left: 4px solid #3949ab; color: #1a237e; }
+    .warn-box.green  { background: #e8f5e9; border-left: 4px solid #2e7d32; color: #1b5e20; }
     .disclaimer {
         background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 6px;
         padding: 0.8rem 1rem; font-size: 0.81rem; color: #5d4037; margin-top: 1.5rem;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# ─── EC 57/2003 corte ─────────────────────────────────────────────────────────
-EC57_CORTE = date(2003, 7, 15)   # publicação EC 57, de 15/07/2003
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONSTANTES / REGRAS
+# ──────────────────────────────────────────────────────────────────────────────
+EC57_CORTE = date(2003, 7, 15)
+DIAS_POR_ANO_LEGAL = 365
+QUINQUENIO_DIAS = 5 * DIAS_POR_ANO_LEGAL
+TRINTENARIO_DIAS = 30 * DIAS_POR_ANO_LEGAL
+RESERVA_TOTAL_DIAS = 35 * DIAS_POR_ANO_LEGAL
+RESERVA_EFETIVO_DIAS = 30 * DIAS_POR_ANO_LEGAL
 
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPERS DE DATA / FORMATAÇÃO
+# ──────────────────────────────────────────────────────────────────────────────
+def td(anos: int, dias: int) -> int:
+    return anos * DIAS_POR_ANO_LEGAL + dias
+
+
+def fmt_date(d: date) -> str:
+    months = [
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    ]
+    return f"{d.day} de {months[d.month - 1]} de {d.year}"
+
+
+def fmt_anos_dias(total_dias: int) -> str:
+    anos = total_dias // DIAS_POR_ANO_LEGAL
+    dias = total_dias % DIAS_POR_ANO_LEGAL
+    return f"{anos} anos e {dias} dias"
+
+
+def days_label(n: int) -> str:
+    a, d = abs(n) // DIAS_POR_ANO_LEGAL, abs(n) % DIAS_POR_ANO_LEGAL
+    return f"{a}a {d}d" if a else f"{abs(n)}d"
+
+
+def kind(target: date, ref: date) -> str:
+    if target <= ref:
+        return "acquired"
+    return "future" if (target - ref).days <= QUINQUENIO_DIAS else "far"
+
+
+def card(title: str, sub: str, badge: str, kind_name: str) -> str:
+    return (
+        f'<div class="right-card {kind_name}">'
+        f'<div class="rc-title">{title}</div>'
+        f'<div class="rc-date">{sub}</div>'
+        f'<span class="rc-badge badge-{kind_name}">{badge}</span></div>'
+    )
+
+
+def add_calendar_years_safe(d: date, years: int) -> date:
+    """Soma anos civis, tratando 29/02 em anos não bissextos."""
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        # 29/02 -> 28/02 em ano não bissexto
+        return d.replace(month=2, day=28, year=d.year + years)
+
+
+def estimated_start_from_elapsed(end_date: date, elapsed_days: int) -> date:
+    """
+    Reconstrói a data inicial com contagem inclusiva.
+    Ex.: 31/01/2000 até 06/03/2026 = 9532 dias  ->  start = end - (9532 - 1)
+    """
+    if elapsed_days <= 0:
+        return end_date
+    return end_date - timedelta(days=elapsed_days - 1)
+
+
+def attained_date_from_total(ref: date, total_days: int, marco_days: int) -> date:
+    """
+    Data histórica em que o marco foi atingido.
+    Mantém a coerência com a metodologia da planilha: marco legal em dias de 365,
+    e projeção/reconstrução por diferença em dias corridos no calendário.
+    """
+    return ref - timedelta(days=(total_days - marco_days))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PARSERS
+# ──────────────────────────────────────────────────────────────────────────────
+def normalize_spaces(text: str) -> str:
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+def extract_text_from_pdf(file_obj) -> str:
+    with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
+        pages = [(p.extract_text() or "") for p in pdf.pages]
+    return normalize_spaces("\n".join(pages))
+
 
 def parse_anos_dias(keyword: str, text: str) -> tuple[int, int]:
     for line in text.split("\n"):
@@ -85,276 +185,371 @@ def parse_anos_dias(keyword: str, text: str) -> tuple[int, int]:
     return 0, 0
 
 
-def parse_nao_gozadas_dias(text: str) -> int:
-    """
-    Extrai o total de dias de FÉRIAS ANUAIS NÃO GOZADAS listadas no PDF.
-    Essas férias ainda podem ser usufruídas → não devem entrar no cálculo.
-    Procura a seção 'FÉRIAS ANUAIS – NÃO GOZADAS' e soma os dias listados.
-    """
-    # Localiza o bloco entre NÃO GOZADAS e a próxima seção
-    m = re.search(
-        r"FÉRIAS ANUAIS\s*[–-]\s*NÃO GOZADAS.*?(?=RESUMO|FÉRIAS\s+PRÊMIO\s+NÃO|$)",
-        text, re.IGNORECASE | re.DOTALL
-    )
+def parse_single_int(pattern: str, text: str, flags: int = re.IGNORECASE) -> int:
+    m = re.search(pattern, text, flags)
+    return int(m.group(1)) if m else 0
+
+
+def parse_section_sum(text: str, section_title_pattern: str, row_pattern: str) -> int:
+    m = re.search(section_title_pattern, text, re.IGNORECASE | re.DOTALL)
     if not m:
         return 0
-    bloco = m.group(0)
-    # Cada linha de dado tem: ANO  NUMERO_DE_DIAS  Dobro
+    block = m.group(0)
     total = 0
-    for dias in re.findall(r"^\d{4}\s+(\d+)\s+Dobro", bloco, re.MULTILINE | re.IGNORECASE):
-        total += int(dias)
+    for v in re.findall(row_pattern, block, re.IGNORECASE | re.MULTILINE):
+        total += int(v)
     return total
 
 
-def parse_pdf(f) -> dict | None:
+def parse_nome(text: str) -> str:
+    m = re.search(r"NOME:\s*(.+)", text, re.IGNORECASE)
+    return m.group(1).strip() if m else "Não identificado"
+
+
+def parse_posto(text: str) -> str:
+    m = re.search(r"POSTO\s+OU\s+GRADUA[ÇC][ÃA]O:\s*(.+?)\s+N[ÚU]MERO\s+PM", text, re.IGNORECASE)
+    return m.group(1).strip() if m else "—"
+
+
+def parse_numero_pm(text: str) -> str:
+    m = re.search(r"N[ÚU]MERO\s+PM:\s*([\d.\-]+)", text, re.IGNORECASE)
+    return m.group(1).strip() if m else "—"
+
+
+def parse_quadro(text: str) -> str:
+    m = re.search(r"PERTENCE\s+AO\s+QUADRO:\s*(\S+)", text, re.IGNORECASE)
+    return m.group(1).strip() if m else "—"
+
+
+def parse_unidade(text: str) -> str:
+    m = re.search(r"UNIDADE:\s*(.+)", text, re.IGNORECASE)
+    return m.group(1).strip() if m else "—"
+
+
+def parse_data_referencia(text: str) -> date:
+    m = re.search(r"ATÉ A DATA DE\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"DATA DE\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+    if not m:
+        return date.today()
+    d, mo, y = m.group(1).split("/")
+    return date(int(y), int(mo), int(d))
+
+
+def parse_pdf(file_obj) -> dict | None:
     try:
-        with pdfplumber.open(io.BytesIO(f.read())) as pdf:
-            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-    except Exception as e:
-        st.error(f"Erro ao ler o PDF: {e}")
+        text = extract_text_from_pdf(file_obj)
+    except Exception as exc:
+        st.error(f"Erro ao ler o PDF: {exc}")
         return None
 
     if "CONTAGEM DE TEMPO" not in text.upper():
         st.error("O arquivo não parece ser um relatório de Contagem de Tempo da PMMG.")
         return None
 
-    data: dict = {}
+    nome = parse_nome(text)
+    posto = parse_posto(text)
+    numero_pm = parse_numero_pm(text)
+    quadro = parse_quadro(text)
+    unidade = parse_unidade(text)
+    data_referencia = parse_data_referencia(text)
 
-    m = re.search(r"NOME:\s*(.+)", text, re.IGNORECASE)
-    data["nome"] = m.group(1).strip() if m else "Não identificado"
+    efetivo_anos, efetivo_dias = parse_anos_dias("TOTAL DO TEMPO DE EFETIVO SERVI", text)
+    acrescimo_anos, acrescimo_dias = parse_anos_dias("TOTAL DE ACR", text)
+    total_anos, total_dias = parse_anos_dias("TOTAL DE ANOS DE SERVI", text)
 
-    m = re.search(r"POSTO\s+OU\s+GRADUA[ÇC][ÃA]O:\s*(.+?)\s+N[ÚU]MERO\s+PM", text, re.IGNORECASE)
-    data["posto"] = m.group(1).strip() if m else "—"
+    efetivo_total_dias = td(efetivo_anos, efetivo_dias)
+    acrescimo_total_dias = td(acrescimo_anos, acrescimo_dias)
+    total_servico_dias = td(total_anos, total_dias)
 
-    m = re.search(r"N[ÚU]MERO\s+PM:\s*([\d.\-]+)", text, re.IGNORECASE)
-    data["numero_pm"] = m.group(1).strip() if m else "—"
+    # Componentes informativos extraídos do SIRH
+    ferias_anuais_simples = parse_single_int(r"Férias anuais contadas de forma simples:\s*(\d+)\s+(\d+)", text)
+    ferias_anuais_dobro = 0
+    m_fad = re.search(r"Férias anuais contadas em dobro:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    if m_fad:
+        ferias_anuais_dobro = td(int(m_fad.group(1)), int(m_fad.group(2)))
 
-    m = re.search(r"PERTENCE\s+AO\s+QUADRO:\s*(\S+)", text, re.IGNORECASE)
-    data["quadro"] = m.group(1).strip() if m else "—"
+    m_fps = re.search(r"Férias-prêmio contadas de forma simples:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    ferias_premio_simples = td(int(m_fps.group(1)), int(m_fps.group(2))) if m_fps else 0
 
-    m = re.search(r"UNIDADE:\s*(.+)", text, re.IGNORECASE)
-    data["unidade"] = m.group(1).strip() if m else "—"
+    m_fpd = re.search(r"Férias-prêmio contadas em dobro:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    ferias_premio_dobro = td(int(m_fpd.group(1)), int(m_fpd.group(2))) if m_fpd else 0
 
-    # Data de referência do relatório
-    m = re.search(r"DATA DE (\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
-    if m:
-        try:
-            d, mo, y = m.group(1).split("/")
-            data["data_referencia"] = date(int(y), int(mo), int(d))
-        except Exception:
-            data["data_referencia"] = date.today()
-    else:
-        data["data_referencia"] = date.today()
+    m_avb = re.search(r"Tempo de serviço público averbado:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    averbado_publico = td(int(m_avb.group(1)), int(m_avb.group(2))) if m_avb else 0
 
-    # Tempos
-    ef_a,  ef_d  = parse_anos_dias("TOTAL DO TEMPO DE EFETIVO SERVI", text)
-    ac_a,  ac_d  = parse_anos_dias("TOTAL DE ACR", text)
-    tot_a, tot_d = parse_anos_dias("TOTAL DE ANOS DE SERVI", text)
+    m_inss = re.search(r"Tempo averbado vinculado ao INSS:\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    averbado_inss = td(int(m_inss.group(1)), int(m_inss.group(2))) if m_inss else 0
 
-    # Férias anuais NÃO GOZADAS (ainda podem ser usufruídas → excluir do cálculo)
-    nao_gozadas_simples = parse_nao_gozadas_dias(text)
+    m_arred = re.search(r"Arredondamento \(até 182 dias\):\s*(\d+)\s+(\d+)", text, re.IGNORECASE)
+    arredondamento_dias = td(int(m_arred.group(1)), int(m_arred.group(2))) if m_arred else 0
 
-    # O SIRH conta as não-gozadas em dobro no total → subtraímos o dobro delas
-    # para obter o total que reflete apenas direitos já cristalizados
-    nao_gozadas_dobro = nao_gozadas_simples * 2
-    total_corrigido   = (tot_a * 365 + tot_d) - nao_gozadas_dobro
+    # Entrada auxiliar: apenas para transparência. Não é usado para subtrair nada.
+    bloco_nao_gozadas = re.search(
+        r"FÉRIAS ANUAIS\s*[–-]\s*NÃO GOZADAS.*?(?=RESUMO|FÉRIAS\s+PRÊMIO\s+NÃO|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    ferias_anuais_nao_gozadas_simples = 0
+    if bloco_nao_gozadas:
+        for dias in re.findall(r"^\d{4}\s+(\d+)\s+Dobro", bloco_nao_gozadas.group(0), re.MULTILINE | re.IGNORECASE):
+            ferias_anuais_nao_gozadas_simples += int(dias)
 
-    # Data de ingresso: ref - efetivo serviço
-    ref = data["data_referencia"]
-    ef_total_dias = ef_a * 365 + ef_d
-    data["ingresso_estimado"] = ref - timedelta(days=ef_total_dias)
+    ingresso_estimado = estimated_start_from_elapsed(data_referencia, efetivo_total_dias)
 
-    data.update({
-        "efetivo_anos":         ef_a,
-        "efetivo_dias":         ef_d,
-        "acrescimo_anos":       ac_a,
-        "acrescimo_dias":       ac_d,
-        "total_anos":           tot_a,
-        "total_dias":           tot_d,
-        "nao_gozadas_simples":  nao_gozadas_simples,
-        "nao_gozadas_dobro":    nao_gozadas_dobro,
-        "total_corrigido":      total_corrigido,   # base de cálculo para quinquênio/trintenário
-    })
-    return data
-
-
-def td(anos, dias): return anos * 365 + dias
-def add_days(ref, n): return ref + timedelta(days=n)
-
-def fmt_date(d: date) -> str:
-    months = ["janeiro","fevereiro","março","abril","maio","junho",
-              "julho","agosto","setembro","outubro","novembro","dezembro"]
-    return f"{d.day} de {months[d.month-1]} de {d.year}"
-
-def days_label(n: int) -> str:
-    a, d = abs(n) // 365, abs(n) % 365
-    return f"{a}a {d}d" if a else f"{abs(n)}d"
-
-def kind(target: date, ref: date) -> str:
-    if target <= ref: return "acquired"
-    return "future" if (target - ref).days <= 1825 else "far"
-
-def card(title, sub, badge, k):
-    return (f'<div class="right-card {k}">'
-            f'<div class="rc-title">{title}</div>'
-            f'<div class="rc-date">{sub}</div>'
-            f'<span class="rc-badge badge-{k}">{badge}</span></div>')
+    return {
+        "nome": nome,
+        "posto": posto,
+        "numero_pm": numero_pm,
+        "quadro": quadro,
+        "unidade": unidade,
+        "data_referencia": data_referencia,
+        "efetivo_anos": efetivo_anos,
+        "efetivo_dias": efetivo_dias,
+        "efetivo_total_dias": efetivo_total_dias,
+        "acrescimo_anos": acrescimo_anos,
+        "acrescimo_dias": acrescimo_dias,
+        "acrescimo_total_dias": acrescimo_total_dias,
+        "total_anos": total_anos,
+        "total_dias": total_dias,
+        "total_servico_dias": total_servico_dias,
+        "ingresso_estimado": ingresso_estimado,
+        "ferias_anuais_simples": ferias_anuais_simples,
+        "ferias_anuais_dobro": ferias_anuais_dobro,
+        "ferias_premio_simples": ferias_premio_simples,
+        "ferias_premio_dobro": ferias_premio_dobro,
+        "averbado_publico": averbado_publico,
+        "averbado_inss": averbado_inss,
+        "arredondamento_dias": arredondamento_dias,
+        "ferias_anuais_nao_gozadas_simples": ferias_anuais_nao_gozadas_simples,
+        "texto_extraido": text,
+    }
 
 
-# ─── calculation ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# CÁLCULO DOS DIREITOS
+# ──────────────────────────────────────────────────────────────────────────────
+def quinquenio_applicable(ingresso_estimado: date) -> bool:
+    return ingresso_estimado <= EC57_CORTE
+
 
 def compute_rights(data: dict) -> list[dict]:
-    ref      = data["data_referencia"]
-    tot      = data["total_corrigido"]   # ← já sem férias não-gozadas
-    ef       = td(data["efetivo_anos"], data["efetivo_dias"])
+    ref = data["data_referencia"]
+    total_servico = data["total_servico_dias"]
+    efetivo = data["efetivo_total_dias"]
     ingresso = data["ingresso_estimado"]
-    out      = []
 
-    # ── Quinquênios (art. 63)
-    # Só se aplica a militares ingressos ATÉ 14/07/2003 (antes da EC 57/2003)
-    # Militares pós-EC 57 fazem jus ao ADE, não ao quinquênio
-    direito_quiq = ingresso <= EC57_CORTE
+    out: list[dict] = []
 
-    if direito_quiq:
+    # Quinquênios
+    if quinquenio_applicable(ingresso):
         future_count = 0
         for q in range(1, 20):
-            miss   = q * 5 * 365 - tot
-            target = add_days(ref, miss)
-            k      = kind(target, ref)
-            if miss <= 0:
-                sub   = f"Adquirido em {fmt_date(target)}"
+            marco = q * QUINQUENIO_DIAS
+            if total_servico >= marco:
+                target = attained_date_from_total(ref, total_servico, marco)
+                sub = f"Adquirido em {fmt_date(target)}"
                 badge = "✅ Já adquirido"
+                k = "acquired"
             else:
-                sub   = f"Previsão: {fmt_date(target)}  (faltam {days_label(miss)})"
-                badge = f"⏳ {days_label(miss)}"
+                faltam = marco - total_servico
+                target = ref + timedelta(days=faltam)
+                sub = f"Previsão: {fmt_date(target)} (faltam {days_label(faltam)})"
+                badge = f"⏳ {days_label(faltam)}"
+                k = kind(target, ref)
                 future_count += 1
-            out.append(dict(
-                title  = f"{q}º Quinquênio — +10% sobre remuneração base",
-                sub    = sub, badge = badge, kind = k,
-                target = target, group = "quinquenio", order = q,
-            ))
+
+            out.append(
+                {
+                    "title": f"{q}º Quinquênio — +10% sobre remuneração base",
+                    "sub": sub,
+                    "badge": badge,
+                    "kind": k,
+                    "target": target,
+                    "group": "quinquenio",
+                    "order": q,
+                }
+            )
             if future_count >= 3:
                 break
     else:
-        # Militar pós-EC 57 → não tem quinquênio
-        out.append(dict(
-            title  = "Quinquênio — não aplicável",
-            sub    = (f"Militar ingressou após 15/07/2003 (EC 57/2003). "
-                      f"Faz jus ao <strong>ADE</strong> (Adicional de Desempenho) no lugar do quinquênio."),
-            badge  = "ℹ️ Ver seção ADE abaixo",
-            kind   = "far",
-            target = ref,
-            group  = "quinquenio",
-            order  = 0,
-        ))
+        out.append(
+            {
+                "title": "Quinquênio — não aplicável",
+                "sub": (
+                    "Militar enquadrado no regime posterior à EC 57/2003. "
+                    "Para esses casos, a referência principal passa a ser o ADE."
+                ),
+                "badge": "ℹ️ Ver seção ADE",
+                "kind": "far",
+                "target": ref,
+                "group": "quinquenio",
+                "order": 0,
+            }
+        )
 
-    # ── ADE (arts. 59-A a 59-C)
-    # Militares pós-EC 57 têm ADE obrigatório.
-    # Militares pré-EC 57 podem OPTAR pelo ADE (art. 59-A, caput).
-    # Marcos: número de ADIs satisfatórias (≥ 70%) a partir do ingresso (ou da opção).
+    # ADE — marco anual em calendário civil
+    # Observação: a concessão depende também das ADIs ≥ 70%.
     marcos_ade = [
-        (3,  "6%",  "até 6% (3 ADIs)"),
-        (5,  "10%", "até 10% (5 ADIs)"),
+        (3, "6%", "até 6% (3 ADIs)"),
+        (5, "10%", "até 10% (5 ADIs)"),
         (10, "20%", "até 20% (10 ADIs)"),
         (15, "30%", "até 30% (15 ADIs)"),
         (20, "40%", "até 40% (20 ADIs)"),
         (25, "50%", "até 50% (25 ADIs)"),
         (30, "60%", "até 60% na ativa / até 70% na inatividade (30 ADIs)"),
     ]
-    for adis, pct_curto, pct_label in marcos_ade:
-        target = add_days(ingresso, adis * 365)
-        miss   = (target - ref).days
-        k      = kind(target, ref)
+    for anos_adi, _pct_curto, pct_label in marcos_ade:
+        target = add_calendar_years_safe(ingresso, anos_adi)
+        miss = (target - ref).days
         if miss <= 0:
-            sub   = (f"Marco temporal atingido em {fmt_date(target)}<br>"
-                     f"<em>Requer {adis} ADIs com resultado ≥ 70%</em>")
+            sub = (
+                f"Marco temporal atingido em {fmt_date(target)}<br>"
+                f"<em>Requer {anos_adi} ADIs com resultado ≥ 70%</em>"
+            )
             badge = "✅ Marco temporal atingido"
+            k = "acquired"
         else:
-            sub   = (f"Previsão: {fmt_date(target)}  (faltam {days_label(miss)})<br>"
-                     f"<em>Requer {adis} ADIs com resultado ≥ 70%</em>")
+            sub = (
+                f"Previsão: {fmt_date(target)} (faltam {days_label(miss)})<br>"
+                f"<em>Requer {anos_adi} ADIs com resultado ≥ 70%</em>"
+            )
             badge = f"⏳ {days_label(miss)}"
-        out.append(dict(
-            title  = f"ADE — {pct_label}",
-            sub    = sub, badge = badge, kind = k,
-            target = target, group = "ade", order = adis,
-        ))
+            k = kind(target, ref)
 
-    # ── Adicional Trintenário (art. 64) – 30 anos de serviço (total corrigido)
-    miss30  = 30 * 365 - tot
-    t30     = add_days(ref, miss30)
-    k30     = kind(t30, ref)
-    if miss30 <= 0:
-        sub30, badge30 = f"Adquirido em {fmt_date(t30)}", "✅ Já adquirido"
+        out.append(
+            {
+                "title": f"ADE — {pct_label}",
+                "sub": sub,
+                "badge": badge,
+                "kind": k,
+                "target": target,
+                "group": "ade",
+                "order": anos_adi,
+            }
+        )
+
+    # Trintenário
+    if total_servico >= TRINTENARIO_DIAS:
+        t30 = attained_date_from_total(ref, total_servico, TRINTENARIO_DIAS)
+        sub30 = f"Adquirido em {fmt_date(t30)}"
+        badge30 = "✅ Já adquirido"
+        k30 = "acquired"
     else:
-        sub30  = f"Previsão: {fmt_date(t30)}  (faltam {days_label(miss30)})"
-        badge30 = f"⏳ {days_label(miss30)}"
-    out.append(dict(
-        title  = "Adicional Trintenário — +10% sobre remuneração base",
-        sub    = sub30, badge = badge30, kind = k30,
-        target = t30, group = "trintenario", order = 0,
-    ))
+        faltam30 = TRINTENARIO_DIAS - total_servico
+        t30 = ref + timedelta(days=faltam30)
+        sub30 = f"Previsão: {fmt_date(t30)} (faltam {days_label(faltam30)})"
+        badge30 = f"⏳ {days_label(faltam30)}"
+        k30 = kind(t30, ref)
 
-    # ── Abono de Permanência / Reserva Voluntária (art. 136 II / art. 204 §2º)
-    # Requisito: 35 anos de serviço (total corrigido) E 30 anos de efetivo exercício
-    miss35    = 35 * 365 - tot
-    miss_ef30 = 30 * 365 - ef
-    days_ab   = max(miss35, miss_ef30, 0)
-    tab       = add_days(ref, days_ab)
-    kab       = kind(tab, ref)
-    limiting  = ("35 anos de serviço total" if miss35 >= miss_ef30
-                 else "30 anos de efetivo exercício militar")
-    if days_ab == 0 and miss35 <= 0 and miss_ef30 <= 0:
-        sub_ab   = f"Adquirido em {fmt_date(tab)}"
+    out.append(
+        {
+            "title": "Adicional Trintenário — +10% sobre remuneração base",
+            "sub": sub30,
+            "badge": badge30,
+            "kind": k30,
+            "target": t30,
+            "group": "trintenario",
+            "order": 0,
+        }
+    )
+
+    # Abono / Reserva
+    faltam_total_35 = max(0, RESERVA_TOTAL_DIAS - total_servico)
+    faltam_ef_30 = max(0, RESERVA_EFETIVO_DIAS - efetivo)
+    days_ab = max(faltam_total_35, faltam_ef_30)
+    target_ab = ref + timedelta(days=days_ab)
+    limiting = (
+        "35 anos de serviço total"
+        if faltam_total_35 >= faltam_ef_30
+        else "30 anos de efetivo exercício militar"
+    )
+
+    if days_ab == 0:
+        sub_ab = f"Adquirido em {fmt_date(target_ab)}"
         badge_ab = "✅ Já adquirido"
+        kab = "acquired"
     else:
-        sub_ab   = (f"Previsão: {fmt_date(tab)}  (faltam {days_label(days_ab)})<br>"
-                    f"<em>Fator limitante: {limiting}</em>")
+        sub_ab = (
+            f"Previsão: {fmt_date(target_ab)} (faltam {days_label(days_ab)})<br>"
+            f"<em>Fator limitante: {limiting}</em>"
+        )
         badge_ab = f"⏳ {days_label(days_ab)}"
+        kab = kind(target_ab, ref)
 
-    for grp in ("abono", "reserva"):
-        title = ("Abono de Permanência — 1/3 dos vencimentos" if grp == "abono"
-                 else "Elegibilidade para Transferência Voluntária à Reserva")
-        out.append(dict(title=title, sub=sub_ab, badge=badge_ab, kind=kab,
-                        target=tab, group=grp, order=0))
+    out.append(
+        {
+            "title": "Abono de Permanência — 1/3 dos vencimentos",
+            "sub": sub_ab,
+            "badge": badge_ab,
+            "kind": kab,
+            "target": target_ab,
+            "group": "abono",
+            "order": 0,
+        }
+    )
+    out.append(
+        {
+            "title": "Elegibilidade para Transferência Voluntária à Reserva",
+            "sub": sub_ab,
+            "badge": badge_ab,
+            "kind": kab,
+            "target": target_ab,
+            "group": "reserva",
+            "order": 0,
+        }
+    )
+
     return out
 
 
-# ─── UI ───────────────────────────────────────────────────────────────────────
-
-st.markdown("""
+# ──────────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown(
+    """
 <div class="header-banner">
     <h1>🪖 Calculadora de Direitos – PMMG</h1>
     <p>Quinquênio · ADE · Adicional Trintenário · Abono de Permanência · Reserva Voluntária</p>
-    <p style="opacity:0.55;font-size:0.77rem">Base legal: Lei n.º 5.301/1969 e atualizações (até LC 168/2022) · EC 57/2003</p>
+    <p style="opacity:0.55;font-size:0.77rem">
+        Lógica ajustada para reproduzir a metodologia da planilha manual: marcos jurídicos em dias de 365,
+        sem subtrair automaticamente férias anuais não gozadas do total informado pelo SIRH.
+    </p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 uploaded = st.file_uploader("📄 Faça upload do relatório de Contagem de Tempo (PDF – PMMG)", type=["pdf"])
 
 if not uploaded:
-    st.info("👆 Faça upload do relatório PDF de Contagem de Tempo para calcular seus direitos.")
-    st.markdown("""
-| Direito | Art. | Quem tem direito | Critério |
-|---|---|---|---|
-| Quinquênios | 63 | Ingressos **até 14/07/2003** | +10% a cada 5 **anos de serviço** |
-| ADE | 59-A a 59-C | Ingressos **após EC 57/2003** (ou optantes) | % crescente por ADIs ≥ 70%, de 6% a 60% na ativa |
-| Adicional Trintenário | 64 | Todos | +10% com 30 **anos de serviço** |
-| Abono de Permanência | 204 §2º / 220 §único | Todos | 1/3 dos vencimentos ao atingir requisitos para reserva voluntária |
-| Reserva Voluntária | 136, II | Todos | 35 anos de serviço **e** 30 anos de atividade militar |
+    st.info("👆 Faça upload do relatório PDF de Contagem de Tempo para calcular os direitos.")
+    st.markdown(
+        """
+| Direito | Quem tem direito | Critério usado no app |
+|---|---|---|
+| Quinquênio | Ingressos até 14/07/2003 | 5 anos de serviço = 1.825 dias |
+| ADE | Regime pós-EC 57/2003 ou optantes | Marcos anuais por ADIs |
+| Adicional Trintenário | Conforme a regra aplicável | 30 anos de serviço = 10.950 dias |
+| Abono / Reserva | Conforme a regra aplicável | 35 anos total + 30 anos de efetivo |
 
-> ⚠️ **Férias anuais não gozadas** listadas no relatório são excluídas do cálculo pois ainda podem ser usufruídas pelo militar.
-""")
+> O PDF do SIRH é a entrada. A metodologia de cálculo foi alinhada para reproduzir a contagem manual oficial, inclusive no tratamento dos marcos em dias e no cuidado com datas em anos bissextos.
+"""
+    )
     st.stop()
+
 
 data = parse_pdf(uploaded)
 if data is None:
     st.stop()
 
-ref      = data["data_referencia"]
+rights = compute_rights(data)
+ref = data["data_referencia"]
 ingresso = data["ingresso_estimado"]
 pos_ec57 = ingresso > EC57_CORTE
 
-st.markdown(f"""
+st.markdown(
+    f"""
 <div class="militar-card">
     <h3>👤 {data['nome']}</h3>
     <div class="info-row">
@@ -366,136 +561,138 @@ st.markdown(f"""
         <div class="info-item">Ingresso estimado: <span>{fmt_date(ingresso)}</span></div>
     </div>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# Aviso sobre regime (quinquênio vs ADE)
 if pos_ec57:
-    st.markdown("""
+    st.markdown(
+        """
 <div class="warn-box blue">
-    📋 <strong>Regime ADE:</strong> Militar ingressou após a EC 57/2003 — faz jus ao
-    <strong>ADE (Adicional de Desempenho)</strong> no lugar do quinquênio (art. 59-A, Lei 5.301/69).
+    📋 <strong>Regime predominante: ADE.</strong> O militar ficou enquadrado, pela data estimada de ingresso,
+    no regime posterior à EC 57/2003. Por isso, a seção de quinquênio é apenas informativa.
 </div>
-""", unsafe_allow_html=True)
+""",
+        unsafe_allow_html=True,
+    )
 else:
-    st.markdown("""
-<div class="warn-box blue">
-    📋 <strong>Regime Quinquênio:</strong> Militar ingressou antes da EC 57/2003 — faz jus aos
-    <strong>quinquênios</strong>. Pode optar pelo ADE (art. 59-A, §2º), caso ainda não o tenha feito.
+    st.markdown(
+        """
+<div class="warn-box green">
+    📋 <strong>Regime predominante: quinquênio.</strong> Pela data estimada de ingresso, o militar se enquadra
+    no regime anterior à EC 57/2003. O ADE continua exibido porque pode existir opção em alguns casos.
 </div>
-""", unsafe_allow_html=True)
+""",
+        unsafe_allow_html=True,
+    )
 
-# Resumo do tempo
 st.markdown('<div class="section-title">📊 Resumo do Tempo de Serviço</div>', unsafe_allow_html=True)
 
-aviso_ng = ""
-if data["nao_gozadas_simples"] > 0:
-    aviso_ng = (f'<div class="time-row" style="color:#e65100">'
-                f'<span class="t-label">⚠️ Férias anuais não gozadas (excluídas do cálculo)</span>'
-                f'<span class="t-value">−{data["nao_gozadas_dobro"]} dias (dobro de {data["nao_gozadas_simples"]}d)</span></div>')
-
-st.markdown(f"""
+st.markdown(
+    f"""
 <div class="time-table">
     <div class="time-row">
         <span class="t-label">Efetivo Serviço na PMMG</span>
         <span class="t-value">{data['efetivo_anos']} anos e {data['efetivo_dias']} dias</span>
     </div>
     <div class="time-row">
-        <span class="t-label">Acréscimos Legais (conforme SIRH)</span>
+        <span class="t-label">Acréscimos legais (SIRH)</span>
         <span class="t-value">{data['acrescimo_anos']} anos e {data['acrescimo_dias']} dias</span>
     </div>
     <div class="time-row">
-        <span class="t-label">Total de Anos de Serviço (SIRH)</span>
+        <span class="t-label">Total de anos de serviço (base dos cálculos)</span>
         <span class="t-value">{data['total_anos']} anos e {data['total_dias']} dias</span>
     </div>
-    {aviso_ng}
-    <div class="time-row" style="background:#f0f4ff;border-radius:4px;padding:0.4rem 0.2rem">
-        <span class="t-label"><strong>Total corrigido (base dos cálculos)</strong></span>
-        <span class="t-value"><strong>{data['total_corrigido']//365} anos e {data['total_corrigido']%365} dias</strong></span>
+    <div class="time-row">
+        <span class="t-label">Férias anuais em dobro (informativo)</span>
+        <span class="t-value">{fmt_anos_dias(data['ferias_anuais_dobro'])}</span>
+    </div>
+    <div class="time-row">
+        <span class="t-label">Férias-prêmio em dobro (informativo)</span>
+        <span class="t-value">{fmt_anos_dias(data['ferias_premio_dobro'])}</span>
+    </div>
+    <div class="time-row">
+        <span class="t-label">Arredondamento (informativo)</span>
+        <span class="t-value">{fmt_anos_dias(data['arredondamento_dias'])}</span>
+    </div>
+    <div class="time-row">
+        <span class="t-label">Férias anuais não gozadas listadas no PDF</span>
+        <span class="t-value">{data['ferias_anuais_nao_gozadas_simples']} dias simples</span>
     </div>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-rights = compute_rights(data)
-
-# ── Quinquênios ────────────────────────────────────────────────────────────────
 st.markdown(
-    '<div class="section-title">📅 Quinquênios &nbsp;'
-    '<small style="font-weight:400;font-size:0.8rem">(art. 63 – Lei 5.301/69 · ingressos até 14/07/2003)</small></div>',
-    unsafe_allow_html=True
+    """
+<div class="warn-box orange">
+    ⚠️ <strong>Ponto metodológico adotado:</strong> o app usa como base principal o <strong>Total de anos de serviço</strong>
+    já consolidado no SIRH para os marcos de quinquênio e trintenário. As férias anuais não gozadas são mostradas
+    apenas de forma informativa e <strong>não são subtraídas automaticamente</strong>.
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# Quinquênio
+st.markdown(
+    '<div class="section-title">📅 Quinquênios <small style="font-weight:400;font-size:0.8rem">(art. 63)</small></div>',
+    unsafe_allow_html=True,
 )
 quins = [r for r in rights if r["group"] == "quinquenio"]
-if not pos_ec57:
-    acq_q = [r for r in quins if r["kind"] == "acquired"]
-    fut_q = [r for r in quins if r["kind"] != "acquired"]
-    label = (f"✅ {len(acq_q)} adquirido(s)" if acq_q else "") + \
-            (f"   ⏳ próximos {len(fut_q)}" if fut_q else "")
-    with st.expander(label, expanded=True):
-        for r in acq_q + fut_q:
-            st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-else:
-    for r in quins:
-        st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
+for r in quins:
+    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
 
-# ── ADE ────────────────────────────────────────────────────────────────────────
+# ADE
 st.markdown(
-    '<div class="section-title">📈 ADE – Adicional de Desempenho &nbsp;'
-    '<small style="font-weight:400;font-size:0.8rem">(arts. 59-A a 59-C – Lei 5.301/69)</small></div>',
-    unsafe_allow_html=True
+    '<div class="section-title">📈 ADE <small style="font-weight:400;font-size:0.8rem">(arts. 59-A a 59-C)</small></div>',
+    unsafe_allow_html=True,
 )
-st.markdown("""
-<div class="warn-box orange">
-    ⚠️ <strong>Atenção:</strong> As datas indicam quando o militar atinge o <strong>marco temporal</strong>
-    de cada nível. O percentual só é concedido se o número de <strong>ADIs com resultado ≥ 70%</strong>
-    também for cumprido. Militares pré-EC 57/2003 precisam ter feito a <strong>opção pelo ADE</strong>
-    (art. 59-A). O somatório de quinquênios + ADE não pode exceder 90% da remuneração base (art. 59-A, §5º).
+st.markdown(
+    """
+<div class="warn-box blue">
+    ℹ️ Para o ADE, o app projeta os marcos anuais em <strong>calendário civil</strong>, com tratamento explícito para anos bissextos.
+    A data exibida é o marco temporal; a concessão depende também das ADIs satisfatórias.
 </div>
-""", unsafe_allow_html=True)
-ades  = [r for r in rights if r["group"] == "ade"]
-acq_a = [r for r in ades if r["kind"] == "acquired"]
-fut_a = [r for r in ades if r["kind"] != "acquired"]
-label_a = (f"✅ {len(acq_a)} marco(s) atingido(s)" if acq_a else "") + \
-          (f"   ⏳ próximos {len(fut_a)}" if fut_a else "")
-with st.expander(label_a, expanded=True):
-    for r in acq_a + fut_a:
-        st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
-
-# ── Trintenário ────────────────────────────────────────────────────────────────
-st.markdown(
-    '<div class="section-title">🏅 Adicional Trintenário &nbsp;'
-    '<small style="font-weight:400;font-size:0.8rem">(art. 64 – Lei 5.301/69)</small></div>',
-    unsafe_allow_html=True
+""",
+    unsafe_allow_html=True,
 )
-for r in rights:
-    if r["group"] == "trintenario":
-        st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
+for r in [x for x in rights if x["group"] == "ade"]:
+    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
 
-# ── Abono de Permanência ───────────────────────────────────────────────────────
+# Trintenário
 st.markdown(
-    '<div class="section-title">💰 Abono de Permanência &nbsp;'
-    '<small style="font-weight:400;font-size:0.8rem">(art. 204 §2º / art. 220 §único)</small></div>',
-    unsafe_allow_html=True
+    '<div class="section-title">🏅 Adicional Trintenário <small style="font-weight:400;font-size:0.8rem">(art. 64)</small></div>',
+    unsafe_allow_html=True,
 )
-for r in rights:
-    if r["group"] == "abono":
-        st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
+for r in [x for x in rights if x["group"] == "trintenario"]:
+    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
 
-# ── Reserva Voluntária ─────────────────────────────────────────────────────────
+# Abono
 st.markdown(
-    '<div class="section-title">🎖️ Transferência Voluntária à Reserva &nbsp;'
-    '<small style="font-weight:400;font-size:0.8rem">(art. 136, II – Lei 5.301/69)</small></div>',
-    unsafe_allow_html=True
+    '<div class="section-title">💰 Abono de Permanência <small style="font-weight:400;font-size:0.8rem">(art. 204 §2º / art. 220)</small></div>',
+    unsafe_allow_html=True,
 )
-for r in rights:
-    if r["group"] == "reserva":
-        st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
+for r in [x for x in rights if x["group"] == "abono"]:
+    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
 
-# ── Disclaimer ─────────────────────────────────────────────────────────────────
-st.markdown("""
+# Reserva
+st.markdown(
+    '<div class="section-title">🎖️ Transferência Voluntária à Reserva <small style="font-weight:400;font-size:0.8rem">(art. 136, II)</small></div>',
+    unsafe_allow_html=True,
+)
+for r in [x for x in rights if x["group"] == "reserva"]:
+    st.markdown(card(r["title"], r["sub"], r["badge"], r["kind"]), unsafe_allow_html=True)
+
+st.markdown(
+    """
 <div class="disclaimer">
-    ⚠️ <strong>Aviso Legal:</strong> Estimativas baseadas nos dados do relatório e na Lei n.º 5.301/1969
-    (atualizada até LC 168/2022). Não substituem análise oficial da DAL/PMMG. Afastamentos, licenças,
-    processos administrativos e outros fatores individuais podem alterar as datas calculadas.
-    A data de ingresso é <em>estimada</em> a partir do tempo de efetivo serviço — pequenas variações
-    (±dias) em relação ao ingresso real podem ocorrer.
+    ⚠️ <strong>Aviso:</strong> esta versão foi corrigida para eliminar o principal desvio do script anterior:
+    a subtração automática de férias anuais não gozadas e a mistura indevida entre marcos jurídicos em dias
+    e projeções civis sem tratamento claro de anos bissextos. Ainda assim, casos concretos podem exigir ajuste
+    fino conforme a metodologia interna oficialmente adotada pela DAL/PMMG.
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
