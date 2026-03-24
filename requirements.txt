@@ -1,3 +1,4 @@
-streamlit>=1.35.0
-pdfplumber>=0.11.0
-python-dateutil>=2.9.0
+streamlit
+pdfplumber
+pandas
+openpyxl
