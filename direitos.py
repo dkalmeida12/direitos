@@ -283,11 +283,24 @@ def parse_pdf(text: str) -> dict | None:
         r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*N[ÃA]O\s+GOZADAS",
         r"RESUMO\s+DO\s+TEMPO|RESUMO\s+ANOS",
     )
-    fa_ng_simples        = sum_dobro_lines(bloco_fa_ng, bonus_cada_5=False)
-    fa_ng_bonus          = sum_dobro_lines(bloco_fa_ng, bonus_cada_5=True)
-    data["fa_ng_simples"]       = fa_ng_simples   # dias literais do PDF (sem bônus)
-    data["fa_ng_com_bonus"]     = fa_ng_bonus     # dias + bônus de 1/5 por linha (antes do dobro)
-    data["fa_ng_bonus_dias"]    = fa_ng_bonus - fa_ng_simples  # só os dias de bônus
+    # Extrai FA_NG linha a linha: {ano: dias}
+    fa_ng_por_ano: dict[int, int] = {}
+    for line in bloco_fa_ng.splitlines():
+        if re.search(r"\bDobro\b", line, re.IGNORECASE):
+            nums = re.findall(r"\b(\d+)\b", line)
+            if len(nums) >= 2:
+                ano_ref = int(nums[0])
+                dias    = int(nums[-1])
+                fa_ng_por_ano[ano_ref] = fa_ng_por_ano.get(ano_ref, 0) + dias
+    data["fa_ng_por_ano"] = fa_ng_por_ano  # {ano: dias_literais}
+
+    # Totais agregados (para compatibilidade com o resto do código)
+    fa_ng_simples = sum(fa_ng_por_ano.values())
+    # Bônus +1/5 por linha (antes do dobro)
+    fa_ng_com_bonus = sum(d + d // 5 for d in fa_ng_por_ano.values())
+    data["fa_ng_simples"]    = fa_ng_simples
+    data["fa_ng_com_bonus"]  = fa_ng_com_bonus
+    data["fa_ng_bonus_dias"] = fa_ng_com_bonus - fa_ng_simples
 
     # ── Tempo de serviço público averbado (somente pré-2002)
     # Primeiro: total bruto do SIRH
@@ -306,7 +319,7 @@ def parse_pdf(text: str) -> dict | None:
 
 def build_base(data: dict,
                incluir_fp_ng: bool,
-               incluir_fa_ng: bool,
+               fa_ng_anos_selecionados: set[int],
                spub_pre2002_dias: int) -> dict:
     """
     Monta o total de dias que serve de base para os quinquênios / trintenário.
@@ -315,8 +328,11 @@ def build_base(data: dict,
       • Efetivo serviço: sempre
       • FP contadas (vantagem): SEMPRE em dobro
       • FP não gozadas: em dobro se o usuário marcar
-      • FA vantagem: SEMPRE em dobro
-      • FA não gozadas: em dobro se o usuário marcar
+      • FA vantagem: SEMPRE em dobro (sem bônus +1/5)
+      • FA não gozadas PRESCRITAS selecionadas pelo usuário:
+          - Aplica bônus +1 a cada 5 dias (por exercício, antes do dobro)
+          - Depois dobra o resultado
+      • FA não gozadas DENTRO DO PRAZO: não entram (militar pode ainda usufruir)
       • Serviço público averbado: somente se período anterior a 2002
       • INSS averbado: não entra no quinquênio
       • Arredondamento: conforme SIRH (até 182 dias)
@@ -327,10 +343,21 @@ def build_base(data: dict,
 
     fp_cont_dobro = data["fp_contadas_simples"] * 2
     fp_ng_dobro   = data["fp_ng_simples"] * 2 if incluir_fp_ng else 0
-    # Férias anuais: aplica bônus de +1/5 dias POR LINHA antes de dobrar
-    fa_vant_dobro = data["fa_vant_simples"] * 2     # SEMPRE em dobro (sem bônus — regra +1/5 não se aplica)
-    fa_ng_dobro   = data["fa_ng_com_bonus"] * 2 if incluir_fa_ng else 0  # dobro com bônus
-    arred         = data["arredondamento_dias"]
+    fa_vant_dobro = data["fa_vant_simples"] * 2
+
+    # FA não gozadas: calcula apenas os anos selecionados pelo usuário
+    # Bônus +1/5 aplicado por exercício (antes do dobro)
+    fa_ng_dobro       = 0
+    fa_ng_bonus_total = 0
+    fa_ng_sel_simples = 0
+    for ano, dias in data["fa_ng_por_ano"].items():
+        if ano in fa_ng_anos_selecionados:
+            bonus     = dias // 5
+            com_bonus = dias + bonus
+            fa_ng_dobro       += com_bonus * 2
+            fa_ng_bonus_total += bonus
+            fa_ng_sel_simples += dias
+    arred = data["arredondamento_dias"]
 
     total = (ef
              - ded
@@ -350,13 +377,14 @@ def build_base(data: dict,
         "fp_ng_dobro": fp_ng_dobro,
         "fa_vant_dobro": fa_vant_dobro,
         "fa_ng_dobro": fa_ng_dobro,
+        "fa_ng_sel_simples": fa_ng_sel_simples,
+        "fa_ng_bonus_total": fa_ng_bonus_total,
+        "fa_ng_anos_selecionados": fa_ng_anos_selecionados,
         "spub_pre2002": spub_pre2002_dias,
         "arredondamento": arred,
         "total_calculado": total,
         "sirh_total": sirh_total,
         "diferenca": total - sirh_total,
-        # bônus de +1/5 somente em férias anuais NÃO GOZADAS
-        "fa_ng_bonus_dias": data["fa_ng_bonus_dias"] if incluir_fa_ng else 0,
     }
 
 
@@ -642,8 +670,7 @@ st.markdown(f"""
 
 st.markdown('<div class="section-title">⚙️ Opções de Contabilização</div>', unsafe_allow_html=True)
 
-col_a, col_b = st.columns(2)
-
+col_a = st.container()
 with col_a:
     fp_ng_label = (f"Incluir férias-prêmio **não gozadas** em dobro "
                    f"({data['fp_ng_simples']}d simples → +{data['fp_ng_simples']} dias extras)")
@@ -653,17 +680,61 @@ with col_a:
                                       "de quinquênio e trintenário (art. 108 da Lei 5.301/69).",
                                  disabled=data["fp_ng_simples"] == 0)
 
-with col_b:
-    _fa_ng_bonus = data["fa_ng_bonus_dias"]
-    fa_ng_label = (f"Incluir férias anuais **não gozadas** em dobro "
-                   f"({data['fa_ng_simples']}d + {_fa_ng_bonus}d bônus 1/5 = "
-                   f"{data['fa_ng_com_bonus']}d × 2 = +{data['fa_ng_com_bonus']*2} dias)")
-    incluir_fa_ng = st.checkbox(fa_ng_label,
-                                 value=False,
-                                 help="Férias anuais não gozadas: a cada 5 dias de férias contados "
-                                      "para vantagem, o servidor recebe +1 dia extra (antes do dobro). "
-                                      "Art. 104 c/c art. 108 da Lei 5.301/69.",
-                                 disabled=data["fa_ng_simples"] == 0)
+# FA não gozadas — checkboxes individuais por exercício com classificação por prazo
+# Regra: férias do ano corrente e do ano anterior ainda podem ser usufruídas
+# (prazo máximo: até o final do exercício seguinte). Exercícios anteriores = prescritos.
+_ano_ref = data["data_referencia"].year
+_ano_limite_fruicao = _ano_ref - 1   # militar ainda pode usufruir: ano_ref e ano_ref-1
+
+fa_ng_anos_selecionados = set()
+if data["fa_ng_por_ano"]:
+    st.markdown('''
+<div class="warn-box blue">
+    📋 <strong>Férias anuais não gozadas — seleção por exercício</strong><br>
+    Férias dos exercícios <strong>prescritos</strong> (antes de {ano_limite}) já não podem
+    mais ser usufruídas e podem ser convertidas em vantagem (tempo em dobro + bônus de +1 dia
+    a cada 5 dias). Férias de {ano_limite} e {ano_ref} ainda estão dentro do prazo de fruição.
+</div>'''.format(ano_limite=_ano_limite_fruicao, ano_ref=_ano_ref), unsafe_allow_html=True)
+
+    prescrito_cols = [a for a in sorted(data["fa_ng_por_ano"]) if a < _ano_limite_fruicao]
+    dentro_prazo   = [a for a in sorted(data["fa_ng_por_ano"]) if a >= _ano_limite_fruicao]
+
+    if prescrito_cols:
+        st.markdown("**Exercícios prescritos** *(podem ser convertidos em vantagem):*")
+        _cols = st.columns(min(len(prescrito_cols), 4))
+        for i, ano in enumerate(prescrito_cols):
+            dias = data["fa_ng_por_ano"][ano]
+            bonus = dias // 5
+            com_bonus = dias + bonus
+            with _cols[i % 4]:
+                selecionado = st.checkbox(
+                    f"**{ano}**",
+                    value=True,
+                    key=f"fa_ng_{ano}",
+                    help=f"{ano}: {dias}d + {bonus}d bônus (1/5) = {com_bonus}d simples → {com_bonus*2}d em dobro"
+                )
+                st.caption(f"{dias}d + {bonus}bônus → **+{com_bonus*2}d**")
+                if selecionado:
+                    fa_ng_anos_selecionados.add(ano)
+
+    if dentro_prazo:
+        st.markdown("**Dentro do prazo de fruição** *(o militar ainda pode gozar estas férias):*")
+        _cols2 = st.columns(min(len(dentro_prazo), 4))
+        for i, ano in enumerate(dentro_prazo):
+            dias = data["fa_ng_por_ano"][ano]
+            bonus = dias // 5
+            com_bonus = dias + bonus
+            with _cols2[i % 4]:
+                selecionado = st.checkbox(
+                    f"**{ano}** ⏰",
+                    value=False,
+                    key=f"fa_ng_{ano}",
+                    help=f"{ano}: ainda dentro do prazo de fruição. "
+                         f"Se optar por vantagem: {dias}d + {bonus}d bônus = {com_bonus}d → {com_bonus*2}d em dobro"
+                )
+                st.caption(f"{dias}d *(prazo vigente)*")
+                if selecionado:
+                    fa_ng_anos_selecionados.add(ano)
 
 # ── Serviço público averbado pré-2002
 spub_total = data["spub_total_dias"]
@@ -686,7 +757,7 @@ else:
 
 # ─── Base de cálculo ──────────────────────────────────────────────────────────
 
-base = build_base(data, incluir_fp_ng, incluir_fa_ng, spub_pre2002)
+base = build_base(data, incluir_fp_ng, fa_ng_anos_selecionados, spub_pre2002)
 
 # ─── Checagem em relação ao SIRH ─────────────────────────────────────────────
 
@@ -719,9 +790,10 @@ st.markdown(f"""
         <span class="t-value">+{base['fa_vant_dobro']} dias <small style="color:#777">({data['fa_vant_simples']}d × 2)</small></span>
     </div>
     <div class="time-row">
-        <span class="t-label">Férias anuais não gozadas (dobro {'✅ incluído' if incluir_fa_ng else '⬜ não incluído'})</span>
+        <span class="t-label">Férias anuais não gozadas selecionadas
+        {('<small style="color:#555"> — exerc. ' + ', '.join(str(a) for a in sorted(base['fa_ng_anos_selecionados'])) + '</small>') if base['fa_ng_anos_selecionados'] else '<small style="color:#999"> — nenhum exercício selecionado</small>'}</span>
         <span class="t-value">{'+' if base['fa_ng_dobro']>0 else ''}{base['fa_ng_dobro']} dias
-        {'<small style="color:#777"> (' + str(data['fa_ng_simples']) + 'd + ' + str(data['fa_ng_bonus_dias']) + 'd bônus 1/5) × 2</small>' if incluir_fa_ng and data['fa_ng_bonus_dias']>0 else ''}</span>
+        {'<small style="color:#777"> (' + str(base["fa_ng_sel_simples"]) + 'd + ' + str(base["fa_ng_bonus_total"]) + 'd bônus) × 2</small>' if base['fa_ng_dobro']>0 else ''}</span>
     </div>
     <div class="time-row">
         <span class="t-label">Serviço público averbado pré-2002</span>
@@ -747,12 +819,15 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # Checagem vs SIRH
-# O SIRH SEMPRE inclui fp_ng e fa_ng no seu total.
-# A diferença esperada quando o usuário NÃO marca as opções =
-#   fp_ng_simples*2 + fa_ng_simples*2  (esses itens não foram incluídos pelo usuário)
-# O SIRH usa fa_ng com bônus (31d = 27d literais + 4d bônus) e fp_ng sem bônus
+# O SIRH SEMPRE inclui fp_ng e todas as fa_ng no seu total (com bônus).
+# A diferença esperada = itens não selecionados pelo usuário.
+_fa_ng_todos_com_bonus = sum(d + d // 5 for d in data["fa_ng_por_ano"].values())
+_fa_ng_sel_com_bonus   = sum(
+    (d + d // 5) for ano, d in data["fa_ng_por_ano"].items()
+    if ano in fa_ng_anos_selecionados
+)
 dif_esperada_negativa = -(data["fp_ng_simples"] * 2 * (0 if incluir_fp_ng else 1)
-                         + data["fa_ng_com_bonus"] * 2 * (0 if incluir_fa_ng else 1))
+                         + (_fa_ng_todos_com_bonus - _fa_ng_sel_com_bonus) * 2)
 
 if dif == 0:
     st.markdown("""
@@ -765,8 +840,10 @@ elif abs(dif - dif_esperada_negativa) <= 20:
     explicacao = []
     if not incluir_fp_ng and data["fp_ng_simples"] > 0:
         explicacao.append(f"férias-prêmio não gozadas ({data['fp_ng_simples']*2}d) não incluídas")
-    if not incluir_fa_ng and data["fa_ng_simples"] > 0:
-        explicacao.append(f"férias anuais não gozadas (~{data['fa_ng_com_bonus']*2}d incl. bônus 1/5) não incluídas")
+    _anos_nao_sel = sorted(a for a in data["fa_ng_por_ano"] if a not in fa_ng_anos_selecionados)
+    if _anos_nao_sel:
+        _d_nao_sel = sum((d + d//5)*2 for a,d in data["fa_ng_por_ano"].items() if a in _anos_nao_sel)
+        explicacao.append(f"exerc. FA não gozadas não selecionados ({', '.join(str(a) for a in _anos_nao_sel)}: ~{_d_nao_sel}d)")
     motivo = " e ".join(explicacao) if explicacao else "opções de contabilização"
     st.markdown(f"""
 <div class="warn-box blue">
