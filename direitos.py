@@ -136,19 +136,26 @@ def section_between(text: str, start_pat: str, end_pat: str) -> str:
     return m.group(1) if m else ""
 
 
-def sum_dobro_lines(block: str) -> int:
+def sum_dobro_lines(block: str, bonus_cada_5: bool = False) -> int:
     """Soma o número de dias de todas as linhas que terminam com 'Dobro'.
     O último número em cada linha é sempre a quantidade de dias —
     seja para FP ('1 90 Dobro'), FP_NG ('5 60 Dobro') ou
     FA_NG ('2020 5 Dobro', '2024 13 Dobro').
+
+    bonus_cada_5 (bool): quando True, aplica a regra de férias anuais não gozadas:
+      a cada 5 dias de férias utilizados para vantagem, o servidor recebe +1 dia extra
+      (calculado por linha/ano, antes do dobro).
+      Ex.: 5d → 5 + 5//5 = 6d; 13d → 13 + 13//5 = 15d; 4d → 4 + 4//5 = 4d.
     """
     total = 0
     for line in block.splitlines():
         if re.search(r"\bDobro\b", line, re.IGNORECASE):
             nums = re.findall(r"\b(\d+)\b", line)
             if nums:
-                # Sempre o ÚLTIMO número = número de dias
-                total += int(nums[-1])
+                dias = int(nums[-1])
+                if bonus_cada_5:
+                    dias = dias + dias // 5   # +1 dia a cada 5 dias de férias
+                total += dias
     return total
 
 
@@ -264,8 +271,11 @@ def parse_pdf(text: str) -> dict | None:
         r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*VANTAGEM",
         r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*N[ÃA]O\s+GOZADAS",
     )
-    fa_vant_simples = sum_dobro_lines(bloco_fa_vant)
-    data["fa_vant_simples"] = fa_vant_simples
+    fa_vant_simples = sum_dobro_lines(bloco_fa_vant, bonus_cada_5=False)
+    # Regra de +1/5 NÃO se aplica a férias anuais vantagem (somente às não gozadas)
+    data["fa_vant_simples"]    = fa_vant_simples
+    data["fa_vant_com_bonus"]  = fa_vant_simples   # sem bônus
+    data["fa_vant_bonus_dias"] = 0
 
     # ── Férias anuais não gozadas (pergunta ao usuário)
     bloco_fa_ng = section_between(
@@ -273,8 +283,11 @@ def parse_pdf(text: str) -> dict | None:
         r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*N[ÃA]O\s+GOZADAS",
         r"RESUMO\s+DO\s+TEMPO|RESUMO\s+ANOS",
     )
-    fa_ng_simples = sum_dobro_lines(bloco_fa_ng)
-    data["fa_ng_simples"] = fa_ng_simples
+    fa_ng_simples        = sum_dobro_lines(bloco_fa_ng, bonus_cada_5=False)
+    fa_ng_bonus          = sum_dobro_lines(bloco_fa_ng, bonus_cada_5=True)
+    data["fa_ng_simples"]       = fa_ng_simples   # dias literais do PDF (sem bônus)
+    data["fa_ng_com_bonus"]     = fa_ng_bonus     # dias + bônus de 1/5 por linha (antes do dobro)
+    data["fa_ng_bonus_dias"]    = fa_ng_bonus - fa_ng_simples  # só os dias de bônus
 
     # ── Tempo de serviço público averbado (somente pré-2002)
     # Primeiro: total bruto do SIRH
@@ -314,8 +327,9 @@ def build_base(data: dict,
 
     fp_cont_dobro = data["fp_contadas_simples"] * 2
     fp_ng_dobro   = data["fp_ng_simples"] * 2 if incluir_fp_ng else 0
-    fa_vant_dobro = data["fa_vant_simples"] * 2
-    fa_ng_dobro   = data["fa_ng_simples"] * 2 if incluir_fa_ng else 0
+    # Férias anuais: aplica bônus de +1/5 dias POR LINHA antes de dobrar
+    fa_vant_dobro = data["fa_vant_simples"] * 2     # SEMPRE em dobro (sem bônus — regra +1/5 não se aplica)
+    fa_ng_dobro   = data["fa_ng_com_bonus"] * 2 if incluir_fa_ng else 0  # dobro com bônus
     arred         = data["arredondamento_dias"]
 
     total = (ef
@@ -341,6 +355,8 @@ def build_base(data: dict,
         "total_calculado": total,
         "sirh_total": sirh_total,
         "diferenca": total - sirh_total,
+        # bônus de +1/5 somente em férias anuais NÃO GOZADAS
+        "fa_ng_bonus_dias": data["fa_ng_bonus_dias"] if incluir_fa_ng else 0,
     }
 
 
@@ -638,12 +654,15 @@ with col_a:
                                  disabled=data["fp_ng_simples"] == 0)
 
 with col_b:
+    _fa_ng_bonus = data["fa_ng_bonus_dias"]
     fa_ng_label = (f"Incluir férias anuais **não gozadas** em dobro "
-                   f"({data['fa_ng_simples']}d simples → +{data['fa_ng_simples']} dias extras)")
+                   f"({data['fa_ng_simples']}d + {_fa_ng_bonus}d bônus 1/5 = "
+                   f"{data['fa_ng_com_bonus']}d × 2 = +{data['fa_ng_com_bonus']*2} dias)")
     incluir_fa_ng = st.checkbox(fa_ng_label,
                                  value=False,
-                                 help="Férias anuais não gozadas podem ser contadas em dobro para fins "
-                                      "de quinquênio e trintenário (art. 104 da Lei 5.301/69).",
+                                 help="Férias anuais não gozadas: a cada 5 dias de férias contados "
+                                      "para vantagem, o servidor recebe +1 dia extra (antes do dobro). "
+                                      "Art. 104 c/c art. 108 da Lei 5.301/69.",
                                  disabled=data["fa_ng_simples"] == 0)
 
 # ── Serviço público averbado pré-2002
@@ -697,11 +716,12 @@ st.markdown(f"""
     </div>
     <div class="time-row">
         <span class="t-label">Férias anuais vantagem (sempre dobro)</span>
-        <span class="t-value">+{base['fa_vant_dobro']} dias ({data['fa_vant_simples']}d × 2)</span>
+        <span class="t-value">+{base['fa_vant_dobro']} dias <small style="color:#777">({data['fa_vant_simples']}d × 2)</small></span>
     </div>
     <div class="time-row">
         <span class="t-label">Férias anuais não gozadas (dobro {'✅ incluído' if incluir_fa_ng else '⬜ não incluído'})</span>
-        <span class="t-value">{'+' if base['fa_ng_dobro']>0 else ''}{base['fa_ng_dobro']} dias</span>
+        <span class="t-value">{'+' if base['fa_ng_dobro']>0 else ''}{base['fa_ng_dobro']} dias
+        {'<small style="color:#777"> (' + str(data['fa_ng_simples']) + 'd + ' + str(data['fa_ng_bonus_dias']) + 'd bônus 1/5) × 2</small>' if incluir_fa_ng and data['fa_ng_bonus_dias']>0 else ''}</span>
     </div>
     <div class="time-row">
         <span class="t-label">Serviço público averbado pré-2002</span>
@@ -730,8 +750,9 @@ st.markdown(f"""
 # O SIRH SEMPRE inclui fp_ng e fa_ng no seu total.
 # A diferença esperada quando o usuário NÃO marca as opções =
 #   fp_ng_simples*2 + fa_ng_simples*2  (esses itens não foram incluídos pelo usuário)
+# O SIRH usa fa_ng com bônus (31d = 27d literais + 4d bônus) e fp_ng sem bônus
 dif_esperada_negativa = -(data["fp_ng_simples"] * 2 * (0 if incluir_fp_ng else 1)
-                         + data["fa_ng_simples"] * 2 * (0 if incluir_fa_ng else 1))
+                         + data["fa_ng_com_bonus"] * 2 * (0 if incluir_fa_ng else 1))
 
 if dif == 0:
     st.markdown("""
@@ -745,7 +766,7 @@ elif abs(dif - dif_esperada_negativa) <= 20:
     if not incluir_fp_ng and data["fp_ng_simples"] > 0:
         explicacao.append(f"férias-prêmio não gozadas ({data['fp_ng_simples']*2}d) não incluídas")
     if not incluir_fa_ng and data["fa_ng_simples"] > 0:
-        explicacao.append(f"férias anuais não gozadas (~{data['fa_ng_simples']*2}d) não incluídas")
+        explicacao.append(f"férias anuais não gozadas (~{data['fa_ng_com_bonus']*2}d incl. bônus 1/5) não incluídas")
     motivo = " e ".join(explicacao) if explicacao else "opções de contabilização"
     st.markdown(f"""
 <div class="warn-box blue">
