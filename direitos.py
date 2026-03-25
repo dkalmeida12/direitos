@@ -59,32 +59,54 @@ def card(title: str, sub: str, badge: str, k: str) -> str:
 
 def read_sirh_zip(uploaded_file) -> str | None:
     """
-    O arquivo gerado pelo SIRH/PMMG é na verdade um ZIP contendo páginas
-    como imagens JPEG + arquivos .txt com o texto extraído e um manifest.json.
-    Retorna o texto concatenado de todos os .txt, ou None em caso de erro.
+    Lê o relatório SIRH/PMMG em dois formatos possíveis:
+      1. PDF real (formato atual do SIRH) — usa pdfplumber
+      2. ZIP disfarçado de .pdf (formato antigo) — extrai os .txt internos
+
+    Retorna o texto concatenado de todas as páginas, ou None em caso de erro.
     """
-    try:
-        raw = uploaded_file.read()
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            names = zf.namelist()
-            # Lê o manifest para ordenar as páginas corretamente
-            manifest_names = [n for n in names if n.endswith("manifest.json")]
-            txt_names_ordered = []
-            if manifest_names:
-                manifest = json.loads(zf.read(manifest_names[0]))
-                for pg in sorted(manifest.get("pages", []), key=lambda p: p["page_number"]):
-                    txt_path = pg.get("text", {}).get("path", "")
-                    if txt_path and txt_path in names:
-                        txt_names_ordered.append(txt_path)
-            if not txt_names_ordered:
-                txt_names_ordered = sorted([n for n in names if n.endswith(".txt")])
+    import pdfplumber
+
+    raw = uploaded_file.read()
+
+    # ── Tenta PDF real primeiro (verifica assinatura %PDF)
+    if raw[:4] == b"%PDF":
+        try:
             parts = []
-            for name in txt_names_ordered:
-                parts.append(zf.read(name).decode("utf-8", errors="replace"))
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                for page in pdf.pages:
+                    txt = page.extract_text() or ""
+                    parts.append(txt)
             return "\n".join(parts)
-    except Exception as e:
-        st.error(f"Erro ao ler o arquivo: {e}")
-        return None
+        except Exception as e:
+            st.error(f"Erro ao ler o PDF: {e}")
+            return None
+
+    # ── Tenta formato ZIP (assinatura PK — formato antigo do SIRH)
+    if raw[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                names = zf.namelist()
+                manifest_names = [n for n in names if n.endswith("manifest.json")]
+                txt_names_ordered = []
+                if manifest_names:
+                    manifest = json.loads(zf.read(manifest_names[0]))
+                    for pg in sorted(manifest.get("pages", []), key=lambda p: p["page_number"]):
+                        txt_path = pg.get("text", {}).get("path", "")
+                        if txt_path and txt_path in names:
+                            txt_names_ordered.append(txt_path)
+                if not txt_names_ordered:
+                    txt_names_ordered = sorted([n for n in names if n.endswith(".txt")])
+                parts = []
+                for name in txt_names_ordered:
+                    parts.append(zf.read(name).decode("utf-8", errors="replace"))
+                return "\n".join(parts)
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo ZIP interno: {e}")
+            return None
+
+    st.error("Formato de arquivo não reconhecido. Envie o PDF de Contagem de Tempo gerado pelo SIRH/PMMG.")
+    return None
 
 
 def normalize(text: str) -> str:
@@ -115,14 +137,18 @@ def section_between(text: str, start_pat: str, end_pat: str) -> str:
 
 
 def sum_dobro_lines(block: str) -> int:
-    """Soma o número de dias de todas as linhas que terminam com 'Dobro'."""
+    """Soma o número de dias de todas as linhas que terminam com 'Dobro'.
+    O último número em cada linha é sempre a quantidade de dias —
+    seja para FP ('1 90 Dobro'), FP_NG ('5 60 Dobro') ou
+    FA_NG ('2020 5 Dobro', '2024 13 Dobro').
+    """
     total = 0
     for line in block.splitlines():
         if re.search(r"\bDobro\b", line, re.IGNORECASE):
             nums = re.findall(r"\b(\d+)\b", line)
             if nums:
-                # O número de dias é o penúltimo token numérico (antes de "Dobro")
-                total += int(nums[-1] if len(nums) == 1 else nums[-2])
+                # Sempre o ÚLTIMO número = número de dias
+                total += int(nums[-1])
     return total
 
 
@@ -217,7 +243,7 @@ def parse_pdf(text: str) -> dict | None:
     # ── Férias-prêmio contadas como tempo de serviço/vantagem (SEMPRE em dobro)
     bloco_fp_cont = section_between(
         text,
-        r"FÉ?RIAS\s+PR[ÊE]MIO\s*[-–]\s*CONTADAS\s+COMO\s+TEMPO\s+DE\s+SERVI[ÇC]O\s*/?\s*VANTAGEM",
+        r"FÉ?RIAS\s+PR[ÊE]MIO\s*[-–]\s*CONTADAS\s+COMO\s+TEMPO\s+DE\s+SERVI[ÇC]O",
         r"FÉ?RIAS\s+PR[ÊE]MIO\s+N[ÃA]O\s+GOZADAS",
     )
     fp_contadas_simples = sum_dobro_lines(bloco_fp_cont)
@@ -227,7 +253,7 @@ def parse_pdf(text: str) -> dict | None:
     bloco_fp_ng = section_between(
         text,
         r"FÉ?RIAS\s+PR[ÊE]MIO\s+N[ÃA]O\s+GOZADAS",
-        r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*VANTAGEM|RESUMO",
+        r"FÉ?RIAS\s+ANUAIS\s*[-–]",
     )
     fp_ng_simples = sum_dobro_lines(bloco_fp_ng)
     data["fp_ng_simples"] = fp_ng_simples
@@ -245,7 +271,7 @@ def parse_pdf(text: str) -> dict | None:
     bloco_fa_ng = section_between(
         text,
         r"FÉ?RIAS\s+ANUAIS\s*[-–]\s*N[ÃA]O\s+GOZADAS",
-        r"RESUMO\s+DO\s+TEMPO\s+DE\s+SERVI[ÇC]O",
+        r"RESUMO\s+DO\s+TEMPO|RESUMO\s+ANOS",
     )
     fa_ng_simples = sum_dobro_lines(bloco_fa_ng)
     data["fa_ng_simples"] = fa_ng_simples
