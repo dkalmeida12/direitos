@@ -228,13 +228,26 @@ def parse_pdf(text: str) -> dict | None:
         data["data_referencia"] = date.today()
 
     # ── tempos do resumo SIRH
-    ef_a, ef_d   = parse_anos_dias(r"TOTAL DO TEMPO DE EFETIVO SERVI[ÇC]O NA PMMG", text)
-    ded_a, ded_d = parse_anos_dias(r"Tempo a deduzir", text)
-    ac_a,  ac_d  = parse_anos_dias(r"TOTAL DE ACR[ÉE]SCIMOS LEGAIS", text)
-    tot_a, tot_d = parse_anos_dias(r"TOTAL DE ANOS DE SERVI[ÇC]O", text)
-    ard_a, ard_d = parse_anos_dias(r"Arredondamento\s*\(at[ée]\s*182\s*dias\)", text)
+    # "Tempo de Efetivo Serviço na PMMG" = BRUTO (antes de deduzir licenças)
+    # "TOTAL DO TEMPO DE EFETIVO SERVIÇO NA PMMG" = LÍQUIDO (bruto − deduzir)
+    # O ingresso usa o BRUTO; os cálculos de benefício usam o LÍQUIDO.
+    bruto_a, bruto_d = parse_anos_dias(r"Tempo de Efetivo Servi[çc]o na PMMG", text)
+    ef_a,    ef_d    = parse_anos_dias(r"TOTAL DO TEMPO DE EFETIVO SERVI[ÇC]O NA PMMG", text)
+    ded_a,   ded_d   = parse_anos_dias(r"Tempo a deduzir", text)
+    ac_a,    ac_d    = parse_anos_dias(r"TOTAL DE ACR[ÉE]SCIMOS LEGAIS", text)
+    tot_a,   tot_d   = parse_anos_dias(r"TOTAL DE ANOS DE SERVI[ÇC]O", text)
+    ard_a,   ard_d   = parse_anos_dias(r"Arredondamento\s*\(at[ée]\s*182\s*dias\)", text)
+
+    # Fallback: se bruto não foi capturado, usa o líquido + deduzir
+    if bruto_a == 0 and bruto_d == 0:
+        bruto_a = ef_a + ded_a
+        bruto_d = ef_d + ded_d
+        if bruto_d >= 365:
+            bruto_a += bruto_d // 365
+            bruto_d  = bruto_d  % 365
 
     data.update({
+        "efetivo_bruto_anos": bruto_a, "efetivo_bruto_dias": bruto_d,
         "efetivo_anos": ef_a, "efetivo_dias": ef_d,
         "deduzir_anos": ded_a, "deduzir_dias": ded_d,
         "acrescimos_anos": ac_a, "acrescimos_dias": ac_d,
@@ -242,10 +255,9 @@ def parse_pdf(text: str) -> dict | None:
         "arredondamento_dias": ard_a * 365 + ard_d,
     })
 
-    efetivo_total = ef_a * 365 + ef_d
-
-    # ── ingresso estimado (contagem inclusiva)
-    data["ingresso_estimado"] = data["data_referencia"] - timedelta(days=efetivo_total - 1)
+    # Ingresso usa o tempo BRUTO (não deduz licenças — a data de posse é fixa)
+    efetivo_bruto = bruto_a * 365 + bruto_d
+    data["ingresso_estimado"] = data["data_referencia"] - timedelta(days=efetivo_bruto - 1)
 
     # ── Férias-prêmio contadas como tempo de serviço/vantagem (SEMPRE em dobro)
     bloco_fp_cont = section_between(
@@ -652,6 +664,12 @@ pos_ec57 = ingresso > EC57_CORTE
 
 # ─── Painel de identificação ──────────────────────────────────────────────────
 
+_ded_dias = data["deduzir_anos"] * 365 + data["deduzir_dias"]
+_ded_nota = (f'<div class="info-item" style="color:#b71c1c;font-size:0.8rem">'
+             f'⚠️ {_ded_dias}d deduzidos (licença/afastamento) — '
+             f'efetivo líquido: {data["efetivo_anos"]}a {data["efetivo_dias"]}d</div>'
+             if _ded_dias > 0 else "")
+
 st.markdown(f"""
 <div class="militar-card">
     <h3>👤 {data['nome']}</h3>
@@ -661,8 +679,11 @@ st.markdown(f"""
         <div class="info-item">Quadro: <span>{data['quadro']}</span></div>
         <div class="info-item">Unidade: <span>{data['unidade']}</span></div>
         <div class="info-item">Data-base: <span>{ref.strftime('%d/%m/%Y')}</span></div>
-        <div class="info-item">Ingresso estimado: <span>{ingresso.strftime('%d/%m/%Y')}</span></div>
+        <div class="info-item">Ingresso estimado: <span>{ingresso.strftime('%d/%m/%Y')}</span>
+            <small style="color:#555"> (baseado em {data['efetivo_bruto_anos']}a {data['efetivo_bruto_dias']}d de serviço bruto)</small>
+        </div>
     </div>
+    {_ded_nota}
 </div>
 """, unsafe_allow_html=True)
 
@@ -774,7 +795,8 @@ tot_sirh_a, tot_sirh_d = data["total_anos"], data["total_dias"]
 st.markdown(f"""
 <div class="time-table">
     <div class="time-row">
-        <span class="t-label">Efetivo Serviço na PMMG</span>
+        <span class="t-label">Efetivo Serviço na PMMG
+        {'<small style="color:#b71c1c"> (bruto ' + str(data["efetivo_bruto_anos"]) + "a " + str(data["efetivo_bruto_dias"]) + "d − " + str(base["deduzir"]) + "d deduzidos)</small>" if base["deduzir"] > 0 else ""}</span>
         <span class="t-value">{ef_a}a {ef_d}d ({base['efetivo']} dias)</span>
     </div>
     <div class="time-row">
