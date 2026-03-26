@@ -348,10 +348,11 @@ def build_base(data: dict,
       • Serviço público averbado: somente se período anterior a 2002
       • INSS averbado: não entra no quinquênio
       • Arredondamento: conforme SIRH (até 182 dias)
-      • Tempo a deduzir: subtrai
+      • Tempo a deduzir: JÁ DESCONTADO pelo SIRH no campo "TOTAL DO TEMPO DE EFETIVO
+        SERVIÇO NA PMMG" — NÃO subtrair novamente aqui (evita dupla dedução).
     """
-    ef = data["efetivo_anos"] * 365 + data["efetivo_dias"]
-    ded = data["deduzir_anos"] * 365 + data["deduzir_dias"]
+    ef = data["efetivo_anos"] * 365 + data["efetivo_dias"]   # já é o líquido (SIRH descontou)
+    ded = data["deduzir_anos"] * 365 + data["deduzir_dias"]  # guardado apenas para exibição
 
     fp_cont_dobro = data["fp_contadas_simples"] * 2
     fp_ng_dobro   = data["fp_ng_simples"] * 2 if incluir_fp_ng else 0
@@ -371,8 +372,7 @@ def build_base(data: dict,
             fa_ng_sel_simples += dias
     arred = data["arredondamento_dias"]
 
-    total = (ef
-             - ded
+    total = (ef               # líquido — dedução já feita pelo SIRH
              + fp_cont_dobro
              + fp_ng_dobro
              + fa_vant_dobro
@@ -825,10 +825,7 @@ st.markdown(f"""
         <span class="t-label">Arredondamento (até 182 dias)</span>
         <span class="t-value">+{base['arredondamento']} dias</span>
     </div>
-    <div class="time-row" style="color:#c62828">
-        <span class="t-label">Tempo a deduzir</span>
-        <span class="t-value">−{base['deduzir']} dias</span>
-    </div>
+    {'<div class="time-row" style="color:#888;font-size:0.82rem"><span class="t-label">⚠️ Tempo a deduzir (' + str(base["deduzir"]) + 'd) — já descontado pelo SIRH no efetivo líquido acima</span></div>' if base["deduzir"] > 0 else ""}
     <div class="time-row" style="background:#e8f5e9;border-radius:4px;padding:0.4rem 0.2rem">
         <span class="t-label"><strong>Total calculado (base dos quinquênios)</strong></span>
         <span class="t-value"><strong>{calc_total//365}a {calc_total%365}d ({calc_total} dias)</strong></span>
